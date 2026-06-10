@@ -1,0 +1,5 @@
+streamlit>=1.36
+supabase>=2.6
+python-dotenv>=1.0
+requests>=2.31
+python-telegram-bot>=21
