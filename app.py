@@ -107,6 +107,9 @@ def build_save_data(step: flow.Step, vals: dict) -> dict | None:
     data = {col: vals[col] for col in part.columns
             if vals.get(col) not in (None, "")}
 
+    if step.key == "capacitor_bank" and flow.parse_cap_count(vals.get("_cap_count")) > 0:
+        data["cells_measurements_data"] = flow.build_capacitors_json(vals)
+
     if step.key == "general_conditions":
         rg = vals.get("rubber_gloves_hv_status")
         if rg:
@@ -363,7 +366,7 @@ def _save_and_generate() -> None:
 
     # 2. Relatório — os dados JÁ foram salvos; uma falha aqui não os perde.
     try:
-        with st.spinner("Gerando o relatório com a IA (Gemini)..."):
+        with st.spinner("Gerando o relatório com a IA (Groq)..."):
             st.session_state.report = report_mod.generate_full_report(os_number, sid)
     except Exception as e:  # noqa: BLE001
         st.session_state.report = None
@@ -396,7 +399,7 @@ def render_report() -> None:
         st.warning(st.session_state.report_error)
         if st.button("🔄 Tentar gerar o relatório novamente"):
             try:
-                with st.spinner("Gerando o relatório com a IA (Gemini)..."):
+                with st.spinner("Gerando o relatório com a IA (Groq)..."):
                     st.session_state.report = report_mod.generate_full_report(
                         st.session_state.os_number, st.session_state.service_order_id)
                 st.session_state.report_error = None

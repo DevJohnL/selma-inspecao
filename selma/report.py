@@ -7,7 +7,8 @@ Fluxo:
   2. Agrega os resumos por coluna do relatório, pede ao Gemini um parágrafo
      técnico por seção + recomendações, e grava 1 linha em `relatory`.
 """
-from . import db, gemini
+from . import db
+from . import groq_client as gemini
 from .registry import get_part
 
 # Mapeia cada coluna de `relatory` para as partes do checklist que a alimentam.

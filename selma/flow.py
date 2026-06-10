@@ -188,13 +188,52 @@ def s_low_voltage(vals: dict) -> list[Question]:
 
 _CAP_CHARS_SECTION = "Por gentileza informe as seguintes características de cada um dos capacitores."
 
+# Campos coletados por capacitor (var sufixada por capacitor: _cap{i}_<campo>).
+_CAP_FIELDS = [
+    ("tensao", "Tensão"),
+    ("potencia", "Potência"),
+    ("corrente_a", "Corrente Fase A"),
+    ("corrente_b", "Corrente Fase B"),
+    ("corrente_c", "Corrente Fase C"),
+]
 
-def _cap_chars() -> list[Question]:
-    return [
-        T("_cap_potencia", "Potência", section=_CAP_CHARS_SECTION),
-        T("_cap_tensao", "Tensão"),
-        T("_cap_corrente", "Corrente Fase A, Fase B, Fase C"),
-    ]
+
+def parse_cap_count(raw) -> int:
+    """Extrai a quantidade de capacitores de uma resposta de texto (tolerante)."""
+    if raw is None:
+        return 0
+    digits = "".join(ch for ch in str(raw) if ch.isdigit())
+    if not digits:
+        return 0
+    try:
+        return int(digits)
+    except ValueError:
+        return 0
+
+
+def _cap_chars(vals: dict) -> list[Question]:
+    """Perguntas por capacitor (Tensão, Potência, Corrente A/B/C) repetidas N vezes."""
+    n = parse_cap_count(vals.get("_cap_count"))
+    qs: list[Question] = []
+    for i in range(1, n + 1):
+        for j, (field, label) in enumerate(_CAP_FIELDS):
+            section = _CAP_CHARS_SECTION if i == 1 and j == 0 else None
+            if j == 0:
+                section = f"Capacitor {i:02d}"
+            qs.append(T(f"_cap{i}_{field}", label, section=section))
+    return qs
+
+
+def build_capacitors_json(vals: dict) -> str:
+    """Consolida os dados por capacitor em JSON para gravar em cells_measurements_data."""
+    import json
+
+    n = parse_cap_count(vals.get("_cap_count"))
+    capacitors = []
+    for i in range(1, n + 1):
+        item = {field: vals.get(f"_cap{i}_{field}", "") for field, _ in _CAP_FIELDS}
+        capacitors.append(item)
+    return json.dumps({"count": n, "capacitors": capacitors}, ensure_ascii=False)
 
 
 def s_capacitor_bank(vals: dict) -> list[Question]:
@@ -212,17 +251,17 @@ def s_capacitor_bank(vals: dict) -> list[Question]:
         return qs
 
     if tipo == "Timer":
-        qs.append(T("cells_measurements_data", "Digite a quantidade de capacitores"))
-        qs += _cap_chars()
+        qs.append(T("_cap_count", "Digite a quantidade de capacitores"))
+        qs += _cap_chars(vals)
     elif tipo == "Controlador":
         qs += [
             T("model", "Modelo"),
             T("manufacturer", "Fabricante"),
             T("outputs_count", "Nº de Saídas"),
             T("_tc_location", "Onde está instalado o TC?"),
-            T("cells_measurements_data", "Digite a quantidade de capacitores"),
+            T("_cap_count", "Digite a quantidade de capacitores"),
         ]
-        qs += _cap_chars()
+        qs += _cap_chars(vals)
     elif tipo == "Fixo":
         qs += [
             T("model", "Qual a seção transversal do alimentador?"),
@@ -238,8 +277,8 @@ def s_capacitor_bank(vals: dict) -> list[Question]:
                 T("_spec_corrente", "Especifique a Corrente"),
                 T("_spec_local", "Especifique a Localização"),
             ]
-        qs.append(T("cells_measurements_data", "Digite a quantidade de capacitores"))
-        qs += _cap_chars()
+        qs.append(T("_cap_count", "Digite a quantidade de capacitores"))
+        qs += _cap_chars(vals)
     return qs
 
 
