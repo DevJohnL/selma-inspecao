@@ -1,4 +1,4 @@
-"""Bot do WhatsApp (via WAHA) que conduz o preenchimento da inspeção.
+"""Bot do WhatsApp (via Evolution API) que conduz o preenchimento da inspeção.
 
 Reaproveita o MESMO motor de fluxo (`selma/flow.py`) e o acesso ao banco
 (`selma/db.py`) usados pelo bot do Telegram (`bot.py`) — sem tocar naquele.
@@ -6,12 +6,13 @@ Diferenças do WhatsApp: não há botões inline; as perguntas de múltipla esco
 são enviadas como lista numerada e o usuário responde com o número da opção. O
 técnico é identificado automaticamente pelo número do remetente.
 
-Arquitetura: servidor Flask que recebe o webhook do WAHA (evento `message`) e
-responde enviando mensagens via API do WAHA (`/api/sendText`). O estado de cada
-conversa fica em memória, indexado pelo chatId.
+Arquitetura: servidor Flask que recebe o webhook da Evolution API (evento
+`messages.upsert`) e responde enviando mensagens via API da Evolution
+(`/message/sendText/{instance}`). O estado de cada conversa fica em memória,
+indexado pelo remoteJid (chatId).
 
 Rodar:  python whatsapp_bot.py
-Apontar o webhook do WAHA para:  http://<host>:<WHATSAPP_BOT_PORT>/webhook
+Apontar o webhook da Evolution para:  http://<host>:<WHATSAPP_BOT_PORT>/webhook
 """
 import json
 import logging
@@ -38,23 +39,23 @@ SESSIONS: dict[str, dict] = {}
 
 
 # --------------------------------------------------------------------------
-# Envio de mensagens via WAHA
+# Envio de mensagens via Evolution API
 # --------------------------------------------------------------------------
 def send_text(chat_id: str, text: str) -> None:
     headers = {"Content-Type": "application/json"}
-    if config.WAHA_API_KEY:
-        headers["X-Api-Key"] = config.WAHA_API_KEY
+    if config.EVOLUTION_API_KEY:
+        headers["apikey"] = config.EVOLUTION_API_KEY
     try:
         res = requests.post(
-            f"{config.WAHA_URL}/api/sendText",
+            f"{config.EVOLUTION_URL}/message/sendText/{config.EVOLUTION_INSTANCE}",
             headers=headers,
-            json={"session": config.WAHA_SESSION, "chatId": chat_id, "text": text},
+            json={"number": chat_id, "text": text},
             timeout=30,
         )
         if not res.ok:
-            logger.error("Falha ao enviar mensagem WAHA %s: %s", res.status_code, res.text[:300])
+            logger.error("Falha ao enviar mensagem Evolution %s: %s", res.status_code, res.text[:300])
     except Exception:  # noqa: BLE001
-        logger.exception("erro ao enviar mensagem via WAHA")
+        logger.exception("erro ao enviar mensagem via Evolution")
 
 
 def _plain(text: str) -> str:
@@ -247,23 +248,23 @@ def _only_digits(value: str | None) -> str:
     return re.sub(r"\D", "", value or "")
 
 
-def extract_phone(payload: dict, chat_id: str) -> str:
-    """Resolve o telefone real do remetente.
+def extract_phone(data: dict, chat_id: str) -> str:
+    """Resolve o telefone real do remetente a partir do `data` do messages.upsert.
 
-    O `from`/chatId pode vir como `@lid` (id oculto, NÃO é telefone), então
-    procuramos o número em campos alternativos do WAHA (varia por engine/versão).
-    Loga cada candidato considerado e o escolhido para diagnóstico interno.
+    O remoteJid individual costuma vir como `5511...@s.whatsapp.net` (o número está
+    embutido), mas pode vir como `@lid` (id oculto, NÃO é telefone). Nesse caso
+    procuramos o número em campos alternativos da Evolution. Loga cada candidato
+    considerado e o escolhido para diagnóstico interno.
     """
-    data = payload.get("_data") or {}
+    key = data.get("key") or {}
     candidates: list[tuple[str, str | None]] = [
-        ("_data.senderPn", data.get("senderPn")),
-        ("_data.cleanedSenderPn", data.get("cleanedSenderPn")),
-        ("_data.remoteJidAlt", data.get("remoteJidAlt")),
-        ("participant", payload.get("participant")),
+        ("key.senderPn", key.get("senderPn")),
+        ("key.remoteJidAlt", key.get("remoteJidAlt")),
+        ("key.participant", key.get("participant")),
     ]
-    frm = payload.get("from") or chat_id
-    if frm.endswith("@c.us") or frm.endswith("@s.whatsapp.net"):
-        candidates.append(("from", frm))
+    frm = key.get("remoteJid") or chat_id
+    if frm.endswith("@s.whatsapp.net") or frm.endswith("@c.us"):
+        candidates.append(("remoteJid", frm))
 
     for source, raw in candidates:
         phone = _only_digits(raw)
@@ -275,7 +276,7 @@ def extract_phone(payload: dict, chat_id: str) -> str:
     fallback = _only_digits(_phone_from_chat_id(frm))
     if frm.endswith("@lid"):
         logger.warning(
-            "extract_phone: 'from'=%s é @lid e nenhum telefone foi resolvido; "
+            "extract_phone: 'remoteJid'=%s é @lid e nenhum telefone foi resolvido; "
             "usando fallback=%s (pode falhar na identificação do técnico)", frm, fallback)
     else:
         logger.info("extract_phone: usando fallback do chatId=%s", fallback)
@@ -302,19 +303,36 @@ def route_message(chat_id: str, text: str, phone: str) -> None:
         send_text(chat_id, "Envie *oi* para iniciar o preenchimento de uma OS.".replace("*", ""))
 
 
+def _extract_text(message: dict) -> str | None:
+    """Texto de uma mensagem da Evolution (conversation ou extendedTextMessage)."""
+    if not isinstance(message, dict):
+        return None
+    conv = message.get("conversation")
+    if isinstance(conv, str):
+        return conv
+    ext = message.get("extendedTextMessage") or {}
+    txt = ext.get("text")
+    return txt if isinstance(txt, str) else None
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(silent=True) or {}
-    logger.info("WAHA payload: %s", json.dumps(data, ensure_ascii=False, default=str))
-    if data.get("event") != "message":
+    body = request.get_json(silent=True) or {}
+    logger.info("Evolution payload: %s", json.dumps(body, ensure_ascii=False, default=str))
+    # A Evolution envia o evento em minúsculas com ponto (ex.: "messages.upsert").
+    if (body.get("event") or "").lower() not in ("messages.upsert", "messages_upsert"):
         return jsonify({"status": "ignored"})
 
-    payload = data.get("payload") or {}
-    if payload.get("fromMe"):
+    data = body.get("data") or {}
+    # Quando vem em lote, `data` pode ser uma lista; pega a primeira mensagem.
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    key = data.get("key") or {}
+    if key.get("fromMe"):
         return jsonify({"status": "ignored"})
 
-    chat_id = payload.get("from")
-    text = payload.get("body")
+    chat_id = key.get("remoteJid")
+    text = _extract_text(data.get("message") or {})
     if not chat_id or not isinstance(text, str) or not text.strip():
         return jsonify({"status": "ignored"})
 
@@ -322,7 +340,7 @@ def webhook():
     if chat_id.endswith("@g.us"):
         return jsonify({"status": "ignored"})
 
-    phone = extract_phone(payload, chat_id)
+    phone = extract_phone(data, chat_id)
 
     try:
         route_message(chat_id, text, phone)
@@ -342,11 +360,11 @@ def main() -> None:
     if config.missing_db_config():
         raise SystemExit("Faltam variáveis do banco no .env: "
                          + ", ".join(config.missing_db_config()))
-    if not config.WAHA_URL:
-        raise SystemExit("WAHA_URL não configurado no .env")
+    if not config.EVOLUTION_URL:
+        raise SystemExit("EVOLUTION_URL não configurado no .env")
 
-    logger.info("Bot WhatsApp iniciado. WAHA_URL=%s sessão=%s porta=%s",
-                config.WAHA_URL, config.WAHA_SESSION, config.WHATSAPP_BOT_PORT)
+    logger.info("Bot WhatsApp iniciado. EVOLUTION_URL=%s instância=%s porta=%s",
+                config.EVOLUTION_URL, config.EVOLUTION_INSTANCE, config.WHATSAPP_BOT_PORT)
     app.run(host="0.0.0.0", port=config.WHATSAPP_BOT_PORT)
 
 

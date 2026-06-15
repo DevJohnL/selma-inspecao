@@ -18,10 +18,10 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 STREAMLIT_APP_URL = os.getenv("STREAMLIT_APP_URL", "http://localhost:8501").strip().rstrip("/")
 
-# WhatsApp via WAHA (WhatsApp HTTP API)
-WAHA_URL = os.getenv("WAHA_URL", "http://localhost:3000").strip().rstrip("/")
-WAHA_SESSION = os.getenv("WAHA_SESSION", "default").strip()
-WAHA_API_KEY = os.getenv("WAHA_API_KEY", "").strip()
+# WhatsApp via Evolution API
+EVOLUTION_URL = os.getenv("EVOLUTION_URL", "http://localhost:8080").strip().rstrip("/")
+EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "default").strip()
+EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "").strip()
 WHATSAPP_BOT_PORT = int(os.getenv("WHATSAPP_BOT_PORT", "8080"))
 
 
