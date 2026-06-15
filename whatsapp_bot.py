@@ -13,7 +13,9 @@ conversa fica em memória, indexado pelo chatId.
 Rodar:  python whatsapp_bot.py
 Apontar o webhook do WAHA para:  http://<host>:<WHATSAPP_BOT_PORT>/webhook
 """
+import json
 import logging
+import re
 
 import requests
 from flask import Flask, jsonify, request
@@ -241,13 +243,52 @@ def _phone_from_chat_id(chat_id: str) -> str:
     return chat_id.split("@", 1)[0]
 
 
-def route_message(chat_id: str, text: str) -> None:
+def _only_digits(value: str | None) -> str:
+    return re.sub(r"\D", "", value or "")
+
+
+def extract_phone(payload: dict, chat_id: str) -> str:
+    """Resolve o telefone real do remetente.
+
+    O `from`/chatId pode vir como `@lid` (id oculto, NÃO é telefone), então
+    procuramos o número em campos alternativos do WAHA (varia por engine/versão).
+    Loga cada candidato considerado e o escolhido para diagnóstico interno.
+    """
+    data = payload.get("_data") or {}
+    candidates: list[tuple[str, str | None]] = [
+        ("_data.senderPn", data.get("senderPn")),
+        ("_data.cleanedSenderPn", data.get("cleanedSenderPn")),
+        ("_data.remoteJidAlt", data.get("remoteJidAlt")),
+        ("participant", payload.get("participant")),
+    ]
+    frm = payload.get("from") or chat_id
+    if frm.endswith("@c.us") or frm.endswith("@s.whatsapp.net"):
+        candidates.append(("from", frm))
+
+    for source, raw in candidates:
+        phone = _only_digits(raw)
+        logger.info("extract_phone: candidato %s=%r -> %r", source, raw, phone)
+        if phone:
+            logger.info("extract_phone: telefone escolhido=%s (via %s)", phone, source)
+            return phone
+
+    fallback = _only_digits(_phone_from_chat_id(frm))
+    if frm.endswith("@lid"):
+        logger.warning(
+            "extract_phone: 'from'=%s é @lid e nenhum telefone foi resolvido; "
+            "usando fallback=%s (pode falhar na identificação do técnico)", frm, fallback)
+    else:
+        logger.info("extract_phone: usando fallback do chatId=%s", fallback)
+    return fallback
+
+
+def route_message(chat_id: str, text: str, phone: str) -> None:
     sess = SESSIONS.get(chat_id)
     cmd = text.strip().lower()
 
     # Reinício explícito ou primeira interação.
     if sess is None or cmd in ("/start", "oi", "olá", "ola", "menu"):
-        start_session(chat_id, _phone_from_chat_id(chat_id))
+        start_session(chat_id, phone)
         return
 
     awaiting = sess.get("awaiting")
@@ -264,6 +305,7 @@ def route_message(chat_id: str, text: str) -> None:
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(silent=True) or {}
+    logger.info("WAHA payload: %s", json.dumps(data, ensure_ascii=False, default=str))
     if data.get("event") != "message":
         return jsonify({"status": "ignored"})
 
@@ -280,8 +322,10 @@ def webhook():
     if chat_id.endswith("@g.us"):
         return jsonify({"status": "ignored"})
 
+    phone = extract_phone(payload, chat_id)
+
     try:
-        route_message(chat_id, text)
+        route_message(chat_id, text, phone)
     except Exception:  # noqa: BLE001
         logger.exception("erro ao processar mensagem")
         send_text(chat_id, "Ops! Tive um problema ao processar sua mensagem. Envie *oi* para recomeçar.".replace("*", ""))
