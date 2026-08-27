@@ -52,9 +52,21 @@ def find_technical_by_phone(phone: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def _service_order_ids_for_technical(technical_id: int) -> list[int]:
+    res = (
+        client().table("service_order_technical").select("service_order_id")
+        .eq("technical_id", technical_id).execute()
+    )
+    return [row["service_order_id"] for row in (res.data or [])]
+
+
 def list_active_orders(technical_id: int) -> list[dict]:
+    order_ids = _service_order_ids_for_technical(technical_id)
+    if not order_ids:
+        return []
+
     def _query(columns: str, only_active: bool):
-        q = client().table("service_order").select(columns).eq("technical", technical_id)
+        q = client().table("service_order").select(columns).in_("id", order_ids)
         if only_active:
             q = q.in_("status", ACTIVE_STATUSES)
         return q.order("created_at", desc=True).execute()

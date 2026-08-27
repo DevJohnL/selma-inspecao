@@ -1,10 +1,12 @@
 """Definição declarativa do fluxo de inspeção, replicando estritamente os bots
 Typebot de `automacao/*.json`.
 
-Ordem dos bots (confirmada pelos `Typebot link`):
-  entrada-alimentacao -> protecao-media-tensao -> transformador ->
-  quadro-protecao-geral -> quadro-geral-baixa-tensao -> banco-capacitores ->
-  condicoes-gerais -> servicos-executados -> observacoes-gerais
+Ordem dos bots:
+  entrada-alimentacao -> transformador -> protecao-media-tensao (só se a
+  potência do transformador for <= 300 kVA e reconhecível, essa etapa é
+  pulada) -> quadro-protecao-geral -> quadro-geral-baixa-tensao ->
+  banco-capacitores -> condicoes-gerais -> servicos-executados ->
+  observacoes-gerais
 
 Cada etapa expõe `build_script(vals)` que devolve a lista ORDENADA de perguntas
 ainda aplicáveis dado o estado atual das respostas (`vals`: var -> valor). As
@@ -15,6 +17,7 @@ O motor (`next_question`) percorre o script e devolve a primeira pergunta cujo
 `qkey` próprio (var + "_desc") mas gravam na MESMA variável — como são inseridas
 depois da escolha, sobrescrevem o valor "OBS"/"Não" ao derivar os valores finais.
 """
+import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -45,26 +48,57 @@ def DESC(var: str, text: str = "Descreva a Situação") -> Question:
 # Scripts por etapa
 # --------------------------------------------------------------------------
 
+_POWER_SUPPLY_STATUS_FIELDS = [
+    ("pole_status", "Poste"),
+    ("crossarms_status", "Cruzetas"),
+    ("hardware_status", "Ferragens"),
+    ("loops_status", "Alças"),
+    ("insulators_status", "Isoladores"),
+    ("terminations_status", "Muflas"),
+    ("connections_status", "Conexões"),
+    ("lightning_arresters_status", "Para-raios"),
+    ("meter_display_status", "Display da medição"),
+    ("disconnect_switch_status", "Chave seccionadora"),
+    ("conduit_status", "Eletroduto"),
+    ("grounding_status", "Tem aterramento?"),
+]
+
+
 def s_power_supply(vals: dict) -> list[Question]:
-    return [
+    qs = [
         C("installation_type", "Qual é o tipo de Medição do local?",
-          ["Conjunto Polimérico", "Shopping", "Cubículo/Cabine"]),
-        T("pole_status", "Poste"),
-        T("crossarms_status", "Cruzetas"),
-        T("hardware_status", "Ferragens"),
-        T("loops_status", "Alças"),
-        T("insulators_status", "Isoladores"),
-        T("terminations_status", "Muflas"),
-        T("connections_status", "Conexões"),
-        T("lightning_arresters_status", "Para-raios"),
-        T("meter_display_status", "Display da medição"),
-        T("disconnect_switch_status", "Chave seccionadora"),
-        T("conduit_status", "Eletroduto"),
-        T("grounding_status", "Tem aterramento?"),
+          ["Conjunto Polimérico", "Shopping", "Cubículo/Cabine", "Medição Semidireta"]),
     ]
+    for var, label in _POWER_SUPPLY_STATUS_FIELDS:
+        qs.append(C(var, label, ["OK", "OBS", "N/C"]))
+        if vals.get(var) == "OBS":
+            qs.append(DESC(var))
+    return qs
+
+
+def parse_power_kva(raw) -> float | None:
+    """Extrai o primeiro valor numérico (kVA) de uma resposta de texto livre.
+
+    Aceita vírgula ou ponto como separador decimal. Devolve None se não achar
+    nenhum número — usado para decidir, com segurança (fail-open), se a etapa
+    de Média Tensão deve ser exibida.
+    """
+    if raw is None:
+        return None
+    match = re.search(r"\d+(?:[.,]\d+)?", str(raw))
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", "."))
+    except ValueError:
+        return None
 
 
 def s_medium_voltage(vals: dict) -> list[Question]:
+    power = parse_power_kva(vals.get("power_rating"))
+    if power is not None and power <= 300:
+        return []
+
     qs = [
         T("disconnect_switch_manufacturer", "Fabricante", section="1. Chave Seccionadora:"),
         T("disconnect_switch_rated_current", "Corrente nominal"),
@@ -354,11 +388,11 @@ class Step:
 STEPS: list[Step] = [
     Step("power_supply_input", "Entrada de Alimentação",
          "Vamos começar pela *Entrada de Alimentação*. ⚡", s_power_supply),
-    Step("medium_voltage_protection", "Proteção em Média Tensão",
-         "Agora vamos verificar a *Proteção em Média Tensão*. ⚡", s_medium_voltage),
     Step("transformer_inspection", "Transformador",
          "Muito bem! Vamos agora para a inspeção do *Transformador*. ⚡",
          s_transformer, instance_field="transformer_number"),
+    Step("medium_voltage_protection", "Proteção em Média Tensão",
+         "Agora vamos verificar a *Proteção em Média Tensão*. ⚡", s_medium_voltage),
     Step("general_protection_panel", "Quadro de Proteção Geral",
          "Chegamos no *Quadro de Proteção Geral*! ⚡ Atenção aos números.",
          s_general_protection, instance_field="panel_number"),
