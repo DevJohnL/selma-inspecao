@@ -21,7 +21,7 @@ try:
 except Exception:  # noqa: BLE001 - sem secrets.toml (rodando local com .env)
     pass
 
-from selma import config, db, drafts, flow  # noqa: E402
+from selma import config, db, drafts, flow, photos  # noqa: E402
 from selma import report as report_mod  # noqa: E402
 from selma.registry import get_part  # noqa: E402
 
@@ -82,13 +82,131 @@ def init_state() -> None:
         "report_error": None,
         "draft_token": None,
         "draft_loaded": False,
+        "draft_error": None,
+        "notice": None,
+        "photo_nonce": 0,       # troca a key dos uploaders para limpá-los após o envio
     }
     for k, v in d.items():
         st.session_state.setdefault(k, v)
 
 
+# Marcador gravado junto às respostas quando o técnico pula uma etapa. Fica no
+# rascunho para que o "pulo" sobreviva a um reload da página.
+SKIP_KEY = "__skip__"
+
+
 def recs_for(step_idx: int) -> list[dict]:
     return [r for r in st.session_state.responses if r["step_idx"] == step_idx]
+
+
+def step_skipped(step_idx: int) -> bool:
+    return any(r["qkey"] == SKIP_KEY for r in recs_for(step_idx))
+
+
+def step_pending(step_idx: int) -> bool:
+    """Etapa com pergunta ainda sem resposta (ou pulada) — precisa de atenção."""
+    step = flow.STEPS[step_idx]
+    return step_skipped(step_idx) or flow.next_question(step, recs_for(step_idx)) is not None
+
+
+# --------------------------------------------------------------------------
+# Rascunho (persistência a cada resposta)
+# --------------------------------------------------------------------------
+def persist_draft() -> None:
+    """Grava as respostas no Supabase. Chamado a cada pergunta respondida, para
+    que perder a aba/sessão do celular não perca o progresso."""
+    token = st.session_state.draft_token
+    if not token:
+        return
+    try:
+        drafts.save_answers(token, st.session_state.responses)
+        st.session_state.draft_error = None
+    except Exception as e:  # noqa: BLE001 - não interromper o preenchimento
+        st.session_state.draft_error = (
+            f"Não consegui salvar o progresso agora ({e}). "
+            "Suas respostas continuam na tela; tente responder de novo em instantes."
+        )
+
+
+def sync_transcript() -> None:
+    """Reconstrói o chat e as introduções já exibidas a partir das respostas."""
+    os_number = st.session_state.os_number
+    transcript = [{"role": "bot",
+                   "text": f"Retomando a OS {os_number} de onde você parou. 👇"}]
+    shown: set[int] = set()
+    for r in st.session_state.responses:
+        if r["qkey"] == SKIP_KEY:
+            continue
+        idx = r["step_idx"]
+        if idx not in shown:
+            step = flow.STEPS[idx]
+            transcript.append({"role": "bot", "text": f"{step.title}\n\n{_plain(step.intro)}"})
+            shown.add(idx)
+        transcript.append({"role": "bot", "text": r["label"]})
+        transcript.append({"role": "user", "text": str(r["value"])})
+    st.session_state.transcript = transcript
+    st.session_state.shown_intro = shown
+    st.session_state.pending_prompt = None
+
+
+def restore_from_draft(draft: dict, stage: str) -> None:
+    st.session_state.draft_token = draft["token"]
+    st.session_state.os_number = draft.get("os_number")
+    st.session_state.service_order_id = draft.get("service_order_id")
+    st.session_state.responses = list(draft.get("answers") or [])
+    st.session_state.step_idx = 0  # render_chat avança até a primeira pendência
+    if draft.get("technical_id") and not st.session_state.technical:
+        st.session_state.technical = {"id": draft.get("technical_id"),
+                                      "name": draft.get("technical_name")}
+    sync_transcript()
+    st.session_state.stage = stage
+
+
+# --------------------------------------------------------------------------
+# Navegação entre etapas/perguntas
+# --------------------------------------------------------------------------
+def goto_step(step_idx: int) -> None:
+    """Vai para qualquer etapa. Reabre etapas puladas; etapas já respondidas
+    abrem na revisão, onde podem ser editadas."""
+    st.session_state.responses = [
+        r for r in st.session_state.responses
+        if not (r["step_idx"] == step_idx and r["qkey"] == SKIP_KEY)
+    ]
+    st.session_state.step_idx = step_idx
+    st.session_state.pending_prompt = None
+    persist_draft()
+    step = flow.STEPS[step_idx]
+    if flow.next_question(step, recs_for(step_idx)) is None:
+        st.session_state.stage = "review"
+    else:
+        st.session_state.stage = "chat"
+
+
+def _on_goto_select() -> None:
+    goto_step(int(st.session_state["goto_select"]))
+
+
+def go_back() -> None:
+    """Desfaz a última resposta (da etapa atual ou da anterior mais próxima)."""
+    idx = st.session_state.step_idx
+    resp = st.session_state.responses
+    for i in range(len(resp) - 1, -1, -1):
+        if resp[i]["step_idx"] <= idx:
+            st.session_state.step_idx = resp[i]["step_idx"]
+            del resp[i]
+            break
+    sync_transcript()
+    persist_draft()
+
+
+def skip_step() -> None:
+    idx = st.session_state.step_idx
+    step = flow.STEPS[idx]
+    st.session_state.responses.append({
+        "step_idx": idx, "step_key": step.key, "qkey": SKIP_KEY, "var": SKIP_KEY,
+        "qtype": "meta", "label": "Etapa pulada", "value": "1", "options": None,
+    })
+    persist_draft()
 
 
 # --------------------------------------------------------------------------
@@ -157,6 +275,8 @@ def render_transcript() -> None:
 def render_login() -> None:
     st.markdown('<div class="wa-header">⚡ Selma — Assistente de OS</div>', unsafe_allow_html=True)
     st.write("Olá, eu sou a **Selma**! Vou te ajudar na OS de hoje. 🫡")
+    if st.session_state.notice:
+        st.info(st.session_state.notice)
     faltando = config.missing_db_config()
     if faltando:
         st.error("Configuração ausente no .env: " + ", ".join(faltando))
@@ -185,6 +305,60 @@ def render_login() -> None:
         st.rerun()
 
 
+STATUS_LABELS = {
+    "pending": "Não iniciada",
+    "in_progress": "Em andamento",
+    "awaiting_report": "Aguardando relatório",
+}
+
+
+def open_os(o: dict, tech: dict) -> None:
+    """Abre a OS escolhida, retomando o rascunho em aberto (se houver) ou criando
+    um novo. O token vai para a URL (?draft=) para sobreviver a reloads."""
+    os_number = o["os_number"]
+    sid = db.resolve_service_order_id(os_number)
+    st.session_state.os_number = os_number
+    st.session_state.service_order_id = sid
+    st.session_state.draft_error = None
+
+    draft = None
+    try:
+        draft = drafts.find_open_draft(os_number, tech.get("id"))
+        if draft is None:
+            token = drafts.start_draft(os_number, sid, tech)
+            draft = {"token": token, "os_number": os_number,
+                     "service_order_id": sid, "answers": []}
+    except Exception as e:  # noqa: BLE001 - sem rascunho o chat ainda funciona
+        st.session_state.draft_token = None
+        st.session_state.draft_error = (
+            f"Não consegui ativar o salvamento automático ({e}). "
+            "Você pode continuar, mas o progresso só será gravado no final."
+        )
+
+    if draft is not None:
+        restore_from_draft(draft, "chat")
+        if not draft["answers"]:
+            st.session_state.transcript = [
+                {"role": "bot",
+                 "text": f"Ótimo! Vamos preencher a OS {os_number}. "
+                         "Responda cada item abaixo. 👇"}
+            ]
+        try:
+            st.query_params["draft"] = draft["token"]
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        st.session_state.step_idx = 0
+        st.session_state.responses = []
+        st.session_state.transcript = [
+            {"role": "bot", "text": f"Ótimo! Vamos preencher a OS {os_number}. "
+                                    "Responda cada item abaixo. 👇"}
+        ]
+        st.session_state.shown_intro = set()
+        st.session_state.pending_prompt = None
+        st.session_state.stage = "chat"
+
+
 def render_pick_os() -> None:
     tech = st.session_state.technical
     st.markdown('<div class="wa-header">⚡ Selma — Selecione a OS</div>', unsafe_allow_html=True)
@@ -194,21 +368,10 @@ def render_pick_os() -> None:
         label = f"OS {o['os_number']}"
         if o.get("client_name"):
             label += f" — {o['client_name']}"
+        label += f"  ·  {STATUS_LABELS.get(o.get('status'), 'Não iniciada')}"
         label += f"  ·  {int(round(o['progress'] * 100))}% concluído"
         if st.button(label, key=f"os_{o['os_number']}"):
-            sid = db.resolve_service_order_id(o["os_number"])
-            st.session_state.os_number = o["os_number"]
-            st.session_state.service_order_id = sid
-            st.session_state.step_idx = 0
-            st.session_state.responses = []
-            st.session_state.transcript = [
-                {"role": "bot",
-                 "text": f"Ótimo! Vamos preencher a OS {o['os_number']}. "
-                         "Responda cada item abaixo. 👇"}
-            ]
-            st.session_state.shown_intro = set()
-            st.session_state.pending_prompt = None
-            st.session_state.stage = "chat"
+            open_os(o, tech)
             st.rerun()
     if st.button("⬅ Voltar"):
         st.session_state.stage = "login"
@@ -228,15 +391,16 @@ def record_answer(step_idx: int, step_key: str, q: flow.Question, value: str) ->
     })
     st.session_state.transcript.append({"role": "user", "text": value})
     st.session_state.pending_prompt = None
+    persist_draft()  # grava a cada pergunta: perder a sessão não perde o progresso
     st.rerun()
 
 
 def render_chat() -> None:
-    # Avança até uma etapa com pergunta pendente.
+    # Avança até uma etapa com pergunta pendente (etapas puladas são ignoradas).
     while st.session_state.step_idx < len(flow.STEPS):
         step = flow.STEPS[st.session_state.step_idx]
         q = flow.next_question(step, recs_for(st.session_state.step_idx))
-        if q is None:
+        if q is None or step_skipped(st.session_state.step_idx):
             st.session_state.step_idx += 1
             continue
         break
@@ -270,15 +434,99 @@ def render_chat() -> None:
     total = len(flow.STEPS)
     st.progress((idx) / total, text=f"Etapa {idx + 1} de {total}")
 
+    if st.session_state.draft_error:
+        st.warning(st.session_state.draft_error)
+
+    # Navegação livre: ir para qualquer etapa, voltar uma pergunta ou pular a etapa.
+    st.session_state["goto_select"] = idx
+    st.selectbox(
+        "Ir para a etapa", options=list(range(total)),
+        format_func=lambda i: ("✅ " if not step_pending(i) else
+                               "⏭ " if step_skipped(i) else "▫️ ") + flow.STEPS[i].title,
+        key="goto_select", on_change=_on_goto_select,
+    )
+    nav_back, nav_skip = st.columns(2)
+    if nav_back.button("⬅ Voltar uma pergunta", use_container_width=True,
+                       disabled=not any(r["step_idx"] <= idx for r in st.session_state.responses)):
+        go_back()
+        st.rerun()
+    if nav_skip.button("⏭ Pular esta etapa", use_container_width=True):
+        skip_step()
+        st.rerun()
+
     if q.qtype == "choice":
         cols = st.columns(len(q.options))
         for i, opt in enumerate(q.options):
             if cols[i].button(opt, key=f"opt_{scoped}_{i}", use_container_width=True):
                 record_answer(idx, step.key, q, opt)
+    elif q.qtype == "photo":
+        render_photo_question(idx, step, q, scoped)
     else:
         val = st.chat_input("Digite sua resposta...")
         if val is not None and str(val).strip() != "":
             record_answer(idx, step.key, q, str(val).strip())
+
+
+def render_photo_question(idx: int, step: flow.Step, q: flow.Question, scoped: str) -> None:
+    """Captura de foto do item: envia ao Storage na hora (sobrevive a perder a sessão)
+    e só então registra a resposta, que é apenas o resumo ("N foto(s)" / "Pulada")."""
+    sid = st.session_state.service_order_id
+    slot = q.var.split(":", 1)[1]
+
+    if sid is None:
+        st.warning("Não encontrei a OS no banco, então não dá para enviar fotos agora.")
+        if st.button("⏭ Pular foto", key=f"skip_{scoped}", use_container_width=True):
+            record_answer(idx, step.key, q, "Pulada")
+        return
+
+    try:
+        existing = photos.list_slot_photos(sid, step.key, step.instance, slot)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Não consegui consultar as fotos deste item: {e}")
+        existing = []
+
+    nonce = st.session_state.photo_nonce
+    if existing:
+        st.success(f"📷 {len(existing)} foto(s) já enviada(s) para este item.")
+
+    tab_cam, tab_file = st.tabs(["📷 Tirar foto", "🖼️ Galeria"])
+    with tab_cam:
+        shot = st.camera_input("Tirar foto", key=f"cam_{scoped}_{nonce}",
+                               label_visibility="collapsed")
+    with tab_file:
+        files = st.file_uploader("Escolher fotos", type=photos.ALLOWED_EXTENSIONS,
+                                 accept_multiple_files=True, key=f"file_{scoped}_{nonce}",
+                                 label_visibility="collapsed")
+
+    pending = ([shot] if shot is not None else []) + list(files or [])
+    if pending and st.button(f"⬆ Enviar {len(pending)} foto(s)", type="primary",
+                             key=f"send_{scoped}", use_container_width=True):
+        tech_id = (st.session_state.technical or {}).get("id")
+        try:
+            with st.spinner("Enviando foto(s)..."):
+                for f in pending:
+                    photos.upload_photo(sid, step.key, step.instance, slot, f.getvalue(),
+                                        technical_id=tech_id, caption=q.text)
+        except photos.PhotoError as e:
+            st.error(str(e))
+        else:
+            st.session_state.photo_nonce += 1  # limpa os uploaders
+            st.rerun()
+
+    if existing:
+        col_done, col_del = st.columns(2)
+        if col_done.button("✅ Concluir este item", key=f"done_{scoped}",
+                           use_container_width=True):
+            record_answer(idx, step.key, q, f"{len(existing)} foto(s)")
+        if col_del.button("🗑 Remover fotos", key=f"del_{scoped}", use_container_width=True):
+            try:
+                photos.delete_slot_photos(sid, step.key, step.instance, slot)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Não consegui remover as fotos: {e}")
+            else:
+                st.rerun()
+    elif st.button("⏭ Pular foto", key=f"skip_{scoped}", use_container_width=True):
+        record_answer(idx, step.key, q, "Pulada")
 
 
 def _plain(text: str) -> str:
@@ -287,7 +535,7 @@ def _plain(text: str) -> str:
 
 def _display_records(step_idx: int) -> list[dict]:
     """Recs da etapa, colapsando 'Descreva a situação' sobre a escolha (mesma var)."""
-    recs = recs_for(step_idx)
+    recs = [r for r in recs_for(step_idx) if r["qkey"] != SKIP_KEY]
     last_idx_by_var: dict[str, int] = {}
     for i, r in enumerate(recs):
         last_idx_by_var[r["var"]] = i
@@ -302,6 +550,22 @@ def render_review() -> None:
     if st.session_state.save_error:
         st.error(st.session_state.save_error)
 
+    pendentes = [i for i in range(len(flow.STEPS)) if step_pending(i)]
+    if pendentes:
+        st.warning("Há etapas puladas ou incompletas. Toque para voltar a elas "
+                   "(ou salve assim mesmo, se não se aplicam).")
+        for i in pendentes:
+            nxt = flow.next_question(flow.STEPS[i], recs_for(i))
+            if step_skipped(i):
+                tag = "⏭ pulada"
+            elif nxt is not None and nxt.qtype == "photo":
+                tag = "📷 faltam fotos"
+            else:
+                tag = "▫️ incompleta"
+            if st.button(f"Ir para: {flow.STEPS[i].title} ({tag})", key=f"pend_{i}"):
+                goto_step(i)
+                st.rerun()
+
     with st.form("review_form"):
         for idx, step in enumerate(flow.STEPS):
             recs = _display_records(idx)
@@ -310,7 +574,10 @@ def render_review() -> None:
             st.subheader(step.title)
             for r in recs:
                 wkey = f"edit_{idx}_{r['qkey']}"
-                if r["qtype"] == "choice" and r["options"] and r["value"] in r["options"]:
+                if r["qtype"] == "photo":
+                    # Fotos já estão no Storage: aqui só o resumo (edita-se no chat).
+                    st.caption(f"📷 {r['label']}: {r['value']}")
+                elif r["qtype"] == "choice" and r["options"] and r["value"] in r["options"]:
                     st.selectbox(r["label"], r["options"],
                                  index=r["options"].index(r["value"]), key=wkey)
                 else:
@@ -332,6 +599,7 @@ def _apply_edits() -> None:
             wkey = f"edit_{idx}_{r['qkey']}"
             if wkey in st.session_state:
                 r["value"] = st.session_state[wkey]
+    persist_draft()  # edições da revisão também ficam salvas no rascunho
 
 
 def _save_and_generate() -> None:
@@ -366,7 +634,7 @@ def _save_and_generate() -> None:
 
     # 2. Relatório — os dados JÁ foram salvos; uma falha aqui não os perde.
     try:
-        with st.spinner("Gerando o relatório com a IA (Groq)..."):
+        with st.spinner("Gerando o relatório com a IA..."):
             st.session_state.report = report_mod.generate_full_report(os_number, sid)
     except Exception as e:  # noqa: BLE001
         st.session_state.report = None
@@ -399,7 +667,7 @@ def render_report() -> None:
         st.warning(st.session_state.report_error)
         if st.button("🔄 Tentar gerar o relatório novamente"):
             try:
-                with st.spinner("Gerando o relatório com a IA (Groq)..."):
+                with st.spinner("Gerando o relatório com a IA..."):
                     st.session_state.report = report_mod.generate_full_report(
                         st.session_state.os_number, st.session_state.service_order_id)
                 st.session_state.report_error = None
@@ -422,13 +690,15 @@ def render_report() -> None:
             pass
         for k in ("stage", "os_number", "service_order_id", "step_idx", "responses",
                   "transcript", "shown_intro", "pending_prompt", "report",
-                  "save_error", "report_error", "draft_token", "draft_loaded"):
+                  "save_error", "report_error", "draft_token", "draft_loaded",
+                  "draft_error", "notice"):
             st.session_state.pop(k, None)
         st.rerun()
 
 
 def load_draft_if_present() -> None:
-    """Se a URL tiver ?draft=<token>, carrega o rascunho e vai direto à revisão."""
+    """Se a URL tiver ?draft=<token>, retoma o rascunho: em preenchimento volta
+    ao chat de onde parou; vindo do bot (pending_review) abre a revisão."""
     if st.session_state.draft_loaded:
         return
     token = st.query_params.get("draft")
@@ -443,11 +713,16 @@ def load_draft_if_present() -> None:
     if not draft:
         st.session_state.save_error = "Rascunho não encontrado ou expirado."
         return
-    st.session_state.draft_token = token
-    st.session_state.os_number = draft.get("os_number")
-    st.session_state.service_order_id = draft.get("service_order_id")
-    st.session_state.responses = draft.get("answers") or []
-    st.session_state.stage = "review"
+    status = draft.get("status")
+    if status == "saved":
+        st.session_state.notice = ("Essa OS já foi salva. Entre com seu telefone "
+                                   "para ver suas OS em aberto.")
+        try:
+            st.query_params.clear()
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    restore_from_draft(draft, "chat" if status == "in_progress" else "review")
 
 
 # --------------------------------------------------------------------------

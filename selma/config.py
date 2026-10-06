@@ -10,9 +10,10 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
 
-# Groq (usado na geração do relatório, em vez do Gemini)
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+# Chave de acesso às edge functions (header x-api-key). O relatório é gerado pela
+# edge function `generate-os-report`; a chave da IA (GROQ_API_KEY) fica nos secrets
+# dela no Supabase, não aqui.
+OS_LOOKUP_API_KEY = os.getenv("OS_LOOKUP_API_KEY", "").strip()
 
 # Telegram + link do formulário na nuvem do Streamlit
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -34,5 +35,5 @@ def missing_db_config() -> list[str]:
     return faltando
 
 
-def missing_ai_config() -> list[str]:
-    return [] if GROQ_API_KEY else ["GROQ_API_KEY"]
+def missing_report_config() -> list[str]:
+    return [] if OS_LOOKUP_API_KEY else ["OS_LOOKUP_API_KEY"]

@@ -27,7 +27,7 @@ class Question:
     qkey: str
     var: str
     text: str
-    qtype: str  # 'text' | 'choice'
+    qtype: str  # 'text' | 'choice' | 'photo'
     options: list[str] | None = None
     section: str | None = None  # cabeçalho/instrução exibido antes da pergunta
 
@@ -42,6 +42,82 @@ def C(var: str, text: str, options: list[str], section: str | None = None) -> Qu
 
 def DESC(var: str, text: str = "Descreva a Situação") -> Question:
     return Question(f"{var}_desc", var, text, "text", None, None)
+
+
+def PH(slot: str, text: str) -> Question:
+    """Pergunta de foto (1+ imagens por item). O arquivo vai para o Storage na hora
+    da captura; a resposta guardada é só um resumo ("2 foto(s)" ou "Pulada")."""
+    return Question(f"photo_{slot}", f"photo:{slot}", text, "photo", None, None)
+
+
+# Slots de foto por parte do checklist (seguem os campos "FOTOS:" dos checklists em
+# papel e as colunas photo_*_url do schema). `slot` = nome da coluna sem photo_/_url.
+# Espelhado em app/src/lib/photo-slots.ts (legendas usadas no relatório).
+PHOTO_SLOTS: dict[str, list[tuple[str, str]]] = {
+    "power_supply_input": [
+        ("substation_front", "Subestação — poste (frente)"),
+        ("substation_side", "Subestação — poste (lateral)"),
+        ("connection_branch", "Ramal ou eletroduto de ligação"),
+        ("meter", "Medidor"),
+        ("polymer_detail", "Detalhe do conjunto polimérico"),
+        ("dte", "DTE — detalhes de pendências encontradas"),
+    ],
+    "transformer_inspection": [
+        ("plate", "Placa de identificação do transformador"),
+        ("bushings", "Buchas"),
+        ("secondary_conductors", "Condutores no secundário"),
+        ("grounding", "Aterramento"),
+        ("oil_level_or_tap", "Nível de óleo ou posição do TAP"),
+        ("dte", "DTE — detalhes de pendências encontradas"),
+    ],
+    "medium_voltage_protection": [
+        ("disconnect_switch", "Chave seccionadora"),
+        ("cb_front", "Disjuntor de média tensão (frente)"),
+        ("cb_back", "Disjuntor de média tensão (atrás)"),
+        ("relay", "Relé de proteção"),
+        ("transformers", "TP e TCs"),
+        ("ups", "Nobreak"),
+        ("dte", "DTE — detalhes de pendências encontradas"),
+    ],
+    "general_protection_panel": [
+        ("panel_closed", "Quadro fechado"),
+        ("panel_open", "Quadro aberto"),
+        ("details", "Detalhes"),
+    ],
+    "low_voltage_main_panel": [
+        ("panel_closed", "Quadro fechado"),
+        ("panel_open", "Quadro aberto"),
+        ("main_breaker", "Disjuntor geral"),
+        ("dps_dr", "DPS e DR"),
+        ("grounding", "Aterramento"),
+        ("environment", "Ambiente"),
+        ("dte", "DTE — detalhes de pendências encontradas"),
+    ],
+    "capacitor_bank": [
+        ("panel_closed", "Banco fechado"),
+        ("panel_open", "Banco aberto"),
+        ("main_breaker", "Disjuntor geral"),
+        ("dps_dr", "DPS e DR"),
+        ("grounding", "Aterramento"),
+        ("environment", "Ambiente"),
+        ("dte", "DTE — detalhes de pendências encontradas"),
+    ],
+    "general_conditions": [
+        ("environment", "Ambiente"),
+        ("extinguisher", "Extintor"),
+        ("safety_gear", "Equipamentos de segurança"),
+        ("diagram", "Diagrama unifilar"),
+        ("access_gates", "Grades e portas de acesso"),
+    ],
+    "additional_services_executed": [
+        ("before", "Serviço extra — antes"),
+        ("after", "Serviço extra — depois"),
+    ],
+    "general_observations": [
+        ("oil_collection", "Coleta de óleo"),
+        ("pending_maintenance", "Manutenção pendente"),
+    ],
+}
 
 
 # --------------------------------------------------------------------------
@@ -374,6 +450,27 @@ def s_general_observations(vals: dict) -> list[Question]:
 # Definição das etapas
 # --------------------------------------------------------------------------
 
+def _with_photos(part_key: str, builder: Callable[[dict], list[Question]],
+                 applicable: Callable[[dict], bool] = lambda vals: True,
+                 ) -> Callable[[dict], list[Question]]:
+    """Acrescenta as perguntas de foto ao fim do script da etapa.
+
+    Ficam por último para que o motor só pergunte as fotos depois das perguntas de
+    dados; etapas puladas/inexistentes (script vazio ou não aplicável) não pedem fotos.
+    """
+    def wrapped(vals: dict) -> list[Question]:
+        qs = builder(vals)
+        if not qs or not applicable(vals):
+            return qs
+        return qs + [PH(slot, label) for slot, label in PHOTO_SLOTS.get(part_key, [])]
+    return wrapped
+
+
+def _bank_exists(vals: dict) -> bool:
+    count = vals.get("_bank_count")
+    return count is not None and "0" not in str(count)
+
+
 @dataclass
 class Step:
     key: str            # parte do checklist (registry)
@@ -387,27 +484,37 @@ class Step:
 
 STEPS: list[Step] = [
     Step("power_supply_input", "Entrada de Alimentação",
-         "Vamos começar pela *Entrada de Alimentação*. ⚡", s_power_supply),
+         "Vamos começar pela *Entrada de Alimentação*. ⚡",
+         _with_photos("power_supply_input", s_power_supply)),
     Step("transformer_inspection", "Transformador",
          "Muito bem! Vamos agora para a inspeção do *Transformador*. ⚡",
-         s_transformer, instance_field="transformer_number"),
+         _with_photos("transformer_inspection", s_transformer),
+         instance_field="transformer_number"),
     Step("medium_voltage_protection", "Proteção em Média Tensão",
-         "Agora vamos verificar a *Proteção em Média Tensão*. ⚡", s_medium_voltage),
+         "Agora vamos verificar a *Proteção em Média Tensão*. ⚡",
+         _with_photos("medium_voltage_protection", s_medium_voltage)),
     Step("general_protection_panel", "Quadro de Proteção Geral",
          "Chegamos no *Quadro de Proteção Geral*! ⚡ Atenção aos números.",
-         s_general_protection, instance_field="panel_number"),
+         _with_photos("general_protection_panel", s_general_protection),
+         instance_field="panel_number"),
     Step("low_voltage_main_panel", "Quadro Geral de Baixa Tensão",
          "Agora o *Quadro Geral de Baixa Tensão (QGBT)*. ⚡",
-         s_low_voltage, instance_field="panel_number"),
+         _with_photos("low_voltage_main_panel", s_low_voltage),
+         instance_field="panel_number"),
     Step("capacitor_bank", "Banco de Capacitores",
-         "Muito bem! Agora vamos verificar o *Banco de Capacitores*. ⚡", s_capacitor_bank),
+         "Muito bem! Agora vamos verificar o *Banco de Capacitores*. ⚡",
+         _with_photos("capacitor_bank", s_capacitor_bank, _bank_exists)),
     Step("general_conditions", "Condições Gerais",
          "Estamos quase terminando! Agora as *Condições Gerais* da subestação. ⚡",
-         s_general_conditions),
+         _with_photos("general_conditions", s_general_conditions)),
     Step("additional_services_executed", "Serviços Executados",
-         "Vamos registrar os *Serviços Executados*.", s_additional_services, append_only=True),
+         "Vamos registrar os *Serviços Executados*.",
+         _with_photos("additional_services_executed", s_additional_services,
+                      lambda vals: vals.get("_has_extra") == "Sim"),
+         append_only=True),
     Step("general_observations", "Observações Gerais",
-         "Chegamos na etapa final: *Observações Gerais*! ⚡", s_general_observations),
+         "Chegamos na etapa final: *Observações Gerais*! ⚡",
+         _with_photos("general_observations", s_general_observations)),
 ]
 
 
@@ -423,17 +530,22 @@ def derive_vals(records: list[dict]) -> dict:
     return vals
 
 
-def next_question(step: Step, records: list[dict]) -> Question | None:
+def next_question(step: Step, records: list[dict],
+                  allow_photo: bool = True) -> Question | None:
+    """Próxima pergunta pendente. `allow_photo=False` (bots de texto) ignora as fotos."""
     vals = derive_vals(records)
     script = step.build_script(vals)
     answered = {r["qkey"] for r in records}
     for q in script:
+        if q.qtype == "photo" and not allow_photo:
+            continue
         if q.qkey not in answered:
             return q
     return None
 
 
-def current_step_and_question(records: list[dict], start_idx: int) -> tuple[int, Question | None]:
+def current_step_and_question(records: list[dict], start_idx: int,
+                              allow_photo: bool = True) -> tuple[int, Question | None]:
     """Avança a partir de `start_idx` até a primeira etapa com pergunta pendente.
 
     Retorna (idx, pergunta). Se idx == len(STEPS), o fluxo terminou (pergunta None).
@@ -442,7 +554,7 @@ def current_step_and_question(records: list[dict], start_idx: int) -> tuple[int,
     idx = start_idx
     while idx < len(STEPS):
         recs = [r for r in records if r["step_idx"] == idx]
-        q = next_question(STEPS[idx], recs)
+        q = next_question(STEPS[idx], recs, allow_photo)
         if q is None:
             idx += 1
             continue

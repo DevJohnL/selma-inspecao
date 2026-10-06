@@ -65,27 +65,26 @@ def list_active_orders(technical_id: int) -> list[dict]:
     if not order_ids:
         return []
 
-    def _query(columns: str, only_active: bool):
-        q = client().table("service_order").select(columns).in_("id", order_ids)
-        if only_active:
-            q = q.in_("status", ACTIVE_STATUSES)
-        return q.order("created_at", desc=True).execute()
+    # Status nulo conta como "pending": o app Next criava OS com status null,
+    # o que escondia OS ainda não iniciadas da lista do técnico.
+    active_filter = f"status.in.({','.join(ACTIVE_STATUSES)}),status.is.null"
+
+    def _query(columns: str):
+        return (
+            client().table("service_order").select(columns)
+            .in_("id", order_ids).or_(active_filter)
+            .order("created_at", desc=True).execute()
+        )
 
     full = ("os_number, schedule, status, start_time, shutdown, "
             "checklist_parts, completed_parts, next_part, client(name)")
     minimal = "os_number, schedule, status, start_time, shutdown, client(name)"
 
-    def _run(only_active: bool):
-        try:
-            return _query(full, only_active)
-        except Exception:  # noqa: BLE001 - colunas de progresso podem não existir no banco
-            return _query(minimal, only_active)
-
-    res = _run(only_active=True)
-    # Fallback: se nenhuma OS "ativa" aparecer, mostra todas as OS do técnico
-    # (o banco pode ter status nulo/diferente dos esperados).
-    if not (res.data or []):
-        res = _run(only_active=False)
+    try:
+        res = _query(full)
+    except Exception:  # noqa: BLE001 - colunas de progresso podem não existir no banco
+        res = _query(minimal)
+    # Só ficam de fora as OS concluídas/canceladas.
     orders = []
     for o in res.data or []:
         parts = o.get("checklist_parts") or []
@@ -94,7 +93,7 @@ def list_active_orders(technical_id: int) -> list[dict]:
         orders.append({
             "os_number": o.get("os_number"),
             "schedule": o.get("schedule"),
-            "status": o.get("status"),
+            "status": o.get("status") or "pending",
             "start_time": o.get("start_time"),
             "shutdown": o.get("shutdown"),
             "checklist_parts": parts,
