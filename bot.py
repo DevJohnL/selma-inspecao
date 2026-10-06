@@ -105,8 +105,31 @@ async def on_pick_os(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     context.user_data["records"] = []
     context.user_data["step_idx"] = 0
     context.user_data["shown_intro"] = set()
+    context.user_data["draft_token"] = None
 
-    await query.edit_message_text(f"Ótimo! Vamos preencher a OS {os_number}. 👇")
+    # Salva a cada resposta no rascunho; se já existe um em aberto, retoma dele
+    # (o estado em memória do bot se perde em restart/redeploy).
+    resumed = False
+    try:
+        tech = context.user_data.get("technical")
+        draft = drafts.find_open_draft(os_number, (tech or {}).get("id"))
+        if draft is None:
+            token = drafts.start_draft(os_number, sid, tech)
+        else:
+            token = draft["token"]
+            context.user_data["records"] = list(draft.get("answers") or [])
+            context.user_data["shown_intro"] = {
+                r["step_idx"] for r in context.user_data["records"]}
+            resumed = bool(context.user_data["records"])
+        context.user_data["draft_token"] = token
+    except Exception:  # noqa: BLE001 - sem rascunho o bot ainda funciona
+        logger.exception("erro ao ativar o salvamento automático")
+
+    if resumed:
+        await query.edit_message_text(
+            f"Retomando a OS {os_number} de onde você parou. 👇")
+    else:
+        await query.edit_message_text(f"Ótimo! Vamos preencher a OS {os_number}. 👇")
     await send_next_question(query.message, context)
 
 
@@ -115,7 +138,7 @@ async def on_pick_os(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # --------------------------------------------------------------------------
 async def send_next_question(message, context: ContextTypes.DEFAULT_TYPE) -> None:
     records = context.user_data["records"]
-    idx, q = flow.current_step_and_question(records, context.user_data["step_idx"])
+    idx, q = flow.current_step_and_question(records, context.user_data["step_idx"], allow_photo=False)
     context.user_data["step_idx"] = idx
 
     if q is None:
@@ -166,6 +189,12 @@ def _record_answer(context: ContextTypes.DEFAULT_TYPE, value: str) -> None:
         "options": cur["options"],
     })
     context.user_data["awaiting"] = None
+    token = context.user_data.get("draft_token")
+    if token:
+        try:
+            drafts.save_answers(token, context.user_data["records"])
+        except Exception:  # noqa: BLE001 - não interromper o preenchimento
+            logger.exception("erro ao salvar o progresso")
 
 
 async def on_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -199,12 +228,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # --------------------------------------------------------------------------
 async def finalize(message, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        token = drafts.create_draft(
-            os_number=context.user_data["os_number"],
-            service_order_id=context.user_data.get("service_order_id"),
-            technical=context.user_data.get("technical"),
-            answers=context.user_data["records"],
-        )
+        token = context.user_data.get("draft_token")
+        if token:
+            drafts.finish_draft(token, context.user_data["records"])
+        else:
+            token = drafts.create_draft(
+                os_number=context.user_data["os_number"],
+                service_order_id=context.user_data.get("service_order_id"),
+                technical=context.user_data.get("technical"),
+                answers=context.user_data["records"],
+            )
     except Exception as e:  # noqa: BLE001
         logger.exception("erro ao criar rascunho")
         await message.reply_text(f"Não consegui salvar o rascunho: {e}")

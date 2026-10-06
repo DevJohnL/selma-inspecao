@@ -79,10 +79,16 @@ def _record_answer(sess: dict, value: str) -> None:
         "options": cur["options"],
     })
     sess["awaiting"] = None
+    token = sess.get("draft_token")
+    if token:
+        try:
+            drafts.save_answers(token, sess["records"])
+        except Exception:  # noqa: BLE001 - não interromper o preenchimento
+            logger.exception("erro ao salvar o progresso")
 
 
 def send_next_question(chat_id: str, sess: dict) -> None:
-    idx, q = flow.current_step_and_question(sess["records"], sess["step_idx"])
+    idx, q = flow.current_step_and_question(sess["records"], sess["step_idx"], allow_photo=False)
     sess["step_idx"] = idx
 
     if q is None:
@@ -207,7 +213,28 @@ def handle_pick_os(chat_id: str, sess: dict, text: str) -> None:
     sess["step_idx"] = 0
     sess["shown_intro"] = set()
     sess["awaiting"] = None
-    send_text(chat_id, f"Ótimo! Vamos preencher a OS {os_number}. 👇")
+    sess["draft_token"] = None
+
+    # Salva a cada resposta no rascunho e retoma de onde parou, se houver um em
+    # aberto (SESSIONS vive em memória e some a cada restart/redeploy).
+    resumed = False
+    try:
+        tech = sess.get("technical")
+        draft = drafts.find_open_draft(os_number, (tech or {}).get("id"))
+        if draft is None:
+            sess["draft_token"] = drafts.start_draft(os_number, sid, tech)
+        else:
+            sess["draft_token"] = draft["token"]
+            sess["records"] = list(draft.get("answers") or [])
+            sess["shown_intro"] = {r["step_idx"] for r in sess["records"]}
+            resumed = bool(sess["records"])
+    except Exception:  # noqa: BLE001 - sem rascunho o bot ainda funciona
+        logger.exception("erro ao ativar o salvamento automático")
+
+    if resumed:
+        send_text(chat_id, f"Retomando a OS {os_number} de onde você parou. 👇")
+    else:
+        send_text(chat_id, f"Ótimo! Vamos preencher a OS {os_number}. 👇")
     send_next_question(chat_id, sess)
 
 
@@ -216,12 +243,16 @@ def handle_pick_os(chat_id: str, sess: dict, text: str) -> None:
 # --------------------------------------------------------------------------
 def finalize(chat_id: str, sess: dict) -> None:
     try:
-        token = drafts.create_draft(
-            os_number=sess["os_number"],
-            service_order_id=sess.get("service_order_id"),
-            technical=sess.get("technical"),
-            answers=sess["records"],
-        )
+        token = sess.get("draft_token")
+        if token:
+            drafts.finish_draft(token, sess["records"])
+        else:
+            token = drafts.create_draft(
+                os_number=sess["os_number"],
+                service_order_id=sess.get("service_order_id"),
+                technical=sess.get("technical"),
+                answers=sess["records"],
+            )
     except Exception as e:  # noqa: BLE001
         logger.exception("erro ao criar rascunho")
         send_text(chat_id, f"Não consegui salvar o rascunho: {e}")
