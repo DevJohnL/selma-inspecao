@@ -25,7 +25,16 @@ from selma import config, db, drafts, flow, photos  # noqa: E402
 from selma import report as report_mod  # noqa: E402
 from selma.registry import get_part  # noqa: E402
 
-st.set_page_config(page_title="Selma — Inspeção de OS", page_icon="⚡", layout="centered")
+def _page_icon():
+    """Ícone da aba/atalho: logo da Selma AI (cai para o emoji se o arquivo faltar)."""
+    try:
+        from PIL import Image
+        return Image.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "icon.png"))
+    except Exception:  # noqa: BLE001
+        return "⚡"
+
+
+st.set_page_config(page_title="Selma AI", page_icon=_page_icon(), layout="centered")
 
 
 # --------------------------------------------------------------------------
