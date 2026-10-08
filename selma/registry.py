@@ -64,6 +64,45 @@ CHECKLIST_REGISTRY: list[ChecklistPart] = [
         ],
     ),
     ChecklistPart(
+        key="coil_resistance_test",
+        label="Teste de Resistência de Bobina",
+        table="coil_resistance_test",
+        fk_column="service_order_id",
+        instance_column="transformer_number",
+        columns=[
+            "equipment_model", "photo_device_screen_url", "photo_connection_setup_url",
+            "hv_coil_h1_h2", "hv_coil_h2_h3", "hv_coil_h3_h1",
+            "lv_coil_x1_x0", "lv_coil_x2_x0", "lv_coil_x3_x0",
+        ],
+    ),
+    ChecklistPart(
+        key="insulation_resistance_test",
+        label="Teste de Resistência de Isolamento",
+        table="insulation_resistance_test",
+        fk_column="service_order_id",
+        instance_column="transformer_number",
+        columns=[
+            "equipment_model", "photo_device_screen_url",
+            "primary_phase_r_to_ground", "primary_phase_s_to_ground",
+            "primary_phase_t_to_ground", "secondary_phase_r_to_ground",
+            "secondary_phase_s_to_ground", "secondary_phase_t_to_ground",
+        ],
+    ),
+    ChecklistPart(
+        key="transformation_ratio_test",
+        label="Teste de Relação de Transformação",
+        table="transformation_ratio_test",
+        fk_column="service_order_id",
+        instance_column="transformer_number",
+        columns=[
+            "secondary_voltage", "tap_position", "connection_group", "equipment_model",
+            "photo_device_screen_url", "photo_nameplate_diagram_url",
+            *[f"reading_{n}_{f}" for n in (1, 2, 3)
+              for f in ("h1_terminal", "h2_terminal", "x1_terminal", "x2_terminal",
+                        "value_obtained")],
+        ],
+    ),
+    ChecklistPart(
         key="general_protection_panel",
         label="Painel de Proteção Geral",
         table="general_protection_panel",

@@ -5,7 +5,7 @@ token recebido na URL (?draft=<token>). Usa o mesmo client Service Role do db.py
 """
 import secrets
 
-from . import db
+from . import db, flow
 
 
 def create_draft(os_number: int, service_order_id: int | None,
@@ -56,7 +56,7 @@ def find_open_draft(os_number: int, technical_id: int | None) -> dict | None:
     if technical_id is not None:
         q = q.eq("technical_id", technical_id)
     rows = q.order("created_at", desc=True).limit(1).execute().data or []
-    return rows[0] if rows else None
+    return _realigned(rows[0]) if rows else None
 
 
 def get_draft(token: str) -> dict | None:
@@ -65,7 +65,13 @@ def get_draft(token: str) -> dict | None:
         .eq("token", token).limit(1).execute()
     )
     rows = res.data or []
-    return rows[0] if rows else None
+    return _realigned(rows[0]) if rows else None
+
+
+def _realigned(draft: dict) -> dict:
+    """Rascunhos antigos guardam a posição da etapa; refaz pela chave da etapa."""
+    draft["answers"] = flow.realign_answers(list(draft.get("answers") or []))
+    return draft
 
 
 def finish_draft(token: str, answers: list[dict]) -> None:
