@@ -105,6 +105,21 @@ def list_active_orders(technical_id: int) -> list[dict]:
     return orders
 
 
+def get_checklist_parts(service_order_id: int | None) -> list[str]:
+    """Partes do checklist escolhidas na OS (vazio = todas). Falha vira "todas"."""
+    if service_order_id is None:
+        return []
+    try:
+        res = (
+            client().table("service_order").select("checklist_parts")
+            .eq("id", service_order_id).limit(1).execute()
+        )
+    except Exception:  # noqa: BLE001 - banco sem a coluna: assume todas as partes
+        return []
+    rows = res.data or []
+    return (rows[0].get("checklist_parts") or []) if rows else []
+
+
 def resolve_service_order_id(os_number: int) -> int | None:
     res = (
         client().table("service_order").select("id")
@@ -178,7 +193,9 @@ def _detect_filled_parts(service_order_id: int) -> list[str]:
 
 
 def apply_progress(service_order_id: int, completed_part: str | None = None,
-                   recompute: bool = False) -> dict:
+                   recompute: bool = False, extra_completed: list[str] | None = None) -> dict:
+    """`extra_completed`: partes resolvidas sem gravar dados (puladas por regra do
+    fluxo, ex.: Média Tensão com transformador <= 300 kVA) — contam como concluídas."""
     sb = client()
     try:
         so = (
@@ -199,6 +216,9 @@ def apply_progress(service_order_id: int, completed_part: str | None = None,
 
     if completed_part and get_part(completed_part):
         completed_set.add(completed_part)
+    for key in extra_completed or []:
+        if get_part(key):
+            completed_set.add(key)
     if recompute:
         for key in _detect_filled_parts(service_order_id):
             completed_set.add(key)

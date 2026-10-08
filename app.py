@@ -25,7 +25,16 @@ from selma import config, db, drafts, flow, photos  # noqa: E402
 from selma import report as report_mod  # noqa: E402
 from selma.registry import get_part  # noqa: E402
 
-st.set_page_config(page_title="Selma — Inspeção de OS", page_icon="⚡", layout="centered")
+def _page_icon():
+    """Ícone da aba/atalho: logo da Selma AI (cai para o emoji se o arquivo faltar)."""
+    try:
+        from PIL import Image
+        return Image.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "icon.png"))
+    except Exception:  # noqa: BLE001
+        return "⚡"
+
+
+st.set_page_config(page_title="Selma AI", page_icon=_page_icon(), layout="centered")
 
 
 # --------------------------------------------------------------------------
@@ -72,6 +81,7 @@ def init_state() -> None:
         "orders": [],
         "os_number": None,
         "service_order_id": None,
+        "parts": [],            # partes escolhidas na OS (vazio = todas)
         "step_idx": 0,
         "responses": [],        # [{step_idx, step_key, qkey, var, qtype, label, value, options}]
         "transcript": [],       # [{role, text}]
@@ -103,10 +113,22 @@ def step_skipped(step_idx: int) -> bool:
     return any(r["qkey"] == SKIP_KEY for r in recs_for(step_idx))
 
 
+def shared() -> dict:
+    """Respostas de outras etapas que influenciam o fluxo (ex.: kVA -> Média Tensão)."""
+    return flow.shared_vals(st.session_state.responses)
+
+
+def step_active(step_idx: int) -> bool:
+    """A etapa faz parte desta OS? (o supervisor escolhe as partes do checklist)"""
+    return flow.step_active(flow.STEPS[step_idx], st.session_state.parts)
+
+
 def step_pending(step_idx: int) -> bool:
     """Etapa com pergunta ainda sem resposta (ou pulada) — precisa de atenção."""
+    if not step_active(step_idx):
+        return False
     step = flow.STEPS[step_idx]
-    return step_skipped(step_idx) or flow.next_question(step, recs_for(step_idx)) is not None
+    return step_skipped(step_idx) or flow.next_question(step, recs_for(step_idx), shared=shared()) is not None
 
 
 # --------------------------------------------------------------------------
@@ -153,6 +175,7 @@ def restore_from_draft(draft: dict, stage: str) -> None:
     st.session_state.draft_token = draft["token"]
     st.session_state.os_number = draft.get("os_number")
     st.session_state.service_order_id = draft.get("service_order_id")
+    st.session_state.parts = db.get_checklist_parts(draft.get("service_order_id"))
     st.session_state.responses = list(draft.get("answers") or [])
     st.session_state.step_idx = 0  # render_chat avança até a primeira pendência
     if draft.get("technical_id") and not st.session_state.technical:
@@ -176,7 +199,7 @@ def goto_step(step_idx: int) -> None:
     st.session_state.pending_prompt = None
     persist_draft()
     step = flow.STEPS[step_idx]
-    if flow.next_question(step, recs_for(step_idx)) is None:
+    if flow.next_question(step, recs_for(step_idx), shared=shared()) is None:
         st.session_state.stage = "review"
     else:
         st.session_state.stage = "chat"
@@ -348,6 +371,7 @@ def open_os(o: dict, tech: dict) -> None:
         except Exception:  # noqa: BLE001
             pass
     else:
+        st.session_state.parts = o.get("checklist_parts") or []
         st.session_state.step_idx = 0
         st.session_state.responses = []
         st.session_state.transcript = [
@@ -399,8 +423,9 @@ def render_chat() -> None:
     # Avança até uma etapa com pergunta pendente (etapas puladas são ignoradas).
     while st.session_state.step_idx < len(flow.STEPS):
         step = flow.STEPS[st.session_state.step_idx]
-        q = flow.next_question(step, recs_for(st.session_state.step_idx))
-        if q is None or step_skipped(st.session_state.step_idx):
+        q = flow.next_question(step, recs_for(st.session_state.step_idx), shared=shared())
+        if (q is None or step_skipped(st.session_state.step_idx)
+                or not step_active(st.session_state.step_idx)):
             st.session_state.step_idx += 1
             continue
         break
@@ -411,7 +436,7 @@ def render_chat() -> None:
 
     idx = st.session_state.step_idx
     step = flow.STEPS[idx]
-    q = flow.next_question(step, recs_for(idx))
+    q = flow.next_question(step, recs_for(idx), shared=shared())
 
     # Intro da etapa (uma vez).
     if idx not in st.session_state.shown_intro:
@@ -431,8 +456,10 @@ def render_chat() -> None:
                 f'</div>', unsafe_allow_html=True)
     render_transcript()
 
-    total = len(flow.STEPS)
-    st.progress((idx) / total, text=f"Etapa {idx + 1} de {total}")
+    active = [i for i in range(len(flow.STEPS)) if step_active(i)]
+    total = len(active)
+    pos = active.index(idx) if idx in active else 0
+    st.progress(pos / total, text=f"Etapa {pos + 1} de {total}")
 
     if st.session_state.draft_error:
         st.warning(st.session_state.draft_error)
@@ -440,7 +467,7 @@ def render_chat() -> None:
     # Navegação livre: ir para qualquer etapa, voltar uma pergunta ou pular a etapa.
     st.session_state["goto_select"] = idx
     st.selectbox(
-        "Ir para a etapa", options=list(range(total)),
+        "Ir para a etapa", options=active,
         format_func=lambda i: ("✅ " if not step_pending(i) else
                                "⏭ " if step_skipped(i) else "▫️ ") + flow.STEPS[i].title,
         key="goto_select", on_change=_on_goto_select,
@@ -550,12 +577,12 @@ def render_review() -> None:
     if st.session_state.save_error:
         st.error(st.session_state.save_error)
 
-    pendentes = [i for i in range(len(flow.STEPS)) if step_pending(i)]
+    pendentes = [i for i in range(len(flow.STEPS)) if step_pending(i)]  # só etapas ativas
     if pendentes:
         st.warning("Há etapas puladas ou incompletas. Toque para voltar a elas "
                    "(ou salve assim mesmo, se não se aplicam).")
         for i in pendentes:
-            nxt = flow.next_question(flow.STEPS[i], recs_for(i))
+            nxt = flow.next_question(flow.STEPS[i], recs_for(i), shared=shared())
             if step_skipped(i):
                 tag = "⏭ pulada"
             elif nxt is not None and nxt.qtype == "photo":
@@ -569,7 +596,7 @@ def render_review() -> None:
     with st.form("review_form"):
         for idx, step in enumerate(flow.STEPS):
             recs = _display_records(idx)
-            if not recs:
+            if not recs or not step_active(idx):
                 continue
             st.subheader(step.title)
             for r in recs:
@@ -595,6 +622,8 @@ def render_review() -> None:
 
 def _apply_edits() -> None:
     for idx, step in enumerate(flow.STEPS):
+        if not step_active(idx):
+            continue
         for r in _display_records(idx):
             wkey = f"edit_{idx}_{r['qkey']}"
             if wkey in st.session_state:
@@ -611,17 +640,21 @@ def _save_and_generate() -> None:
     # 1. Salvamento no banco — se falhar aqui, mantém o usuário na revisão.
     try:
         with st.spinner("Salvando respostas no banco..."):
+            auto_done: list[str] = []
             for idx, step in enumerate(flow.STEPS):
+                if not step_active(idx) or step_skipped(idx):
+                    continue
                 recs = recs_for(idx)
-                if not recs:
-                    continue
-                vals = flow.derive_vals(recs)
+                vals = {**shared(), **flow.derive_vals(recs)}
                 data = build_save_data(step, vals)
-                if data is None:
-                    continue
-                db.save_checklist_part(os_number, step.key, data,
-                                       instance=step.instance, mark_complete=True)
-            db.apply_progress(sid, recompute=True)
+                if data is not None:
+                    db.save_checklist_part(os_number, step.key, data,
+                                           instance=step.instance, mark_complete=True)
+                elif flow.next_question(step, recs, shared=shared()) is None:
+                    # Nada a gravar e nada a perguntar: a regra do fluxo dispensou a
+                    # parte (Média Tensão <= 300 kVA, sem banco, sem serviço extra).
+                    auto_done.append(step.key)
+            db.apply_progress(sid, recompute=True, extra_completed=auto_done)
             if st.session_state.draft_token:
                 try:
                     drafts.mark_saved(st.session_state.draft_token)
@@ -689,7 +722,7 @@ def render_report() -> None:
         except Exception:  # noqa: BLE001
             pass
         for k in ("stage", "os_number", "service_order_id", "step_idx", "responses",
-                  "transcript", "shown_intro", "pending_prompt", "report",
+                  "transcript", "shown_intro", "parts", "pending_prompt", "report",
                   "save_error", "report_error", "draft_token", "draft_loaded",
                   "draft_error", "notice"):
             st.session_state.pop(k, None)

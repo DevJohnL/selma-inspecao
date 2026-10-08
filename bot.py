@@ -102,6 +102,7 @@ async def on_pick_os(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     context.user_data["os_number"] = os_number
     context.user_data["service_order_id"] = sid
+    context.user_data["parts"] = db.get_checklist_parts(sid)
     context.user_data["records"] = []
     context.user_data["step_idx"] = 0
     context.user_data["shown_intro"] = set()
@@ -138,7 +139,9 @@ async def on_pick_os(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # --------------------------------------------------------------------------
 async def send_next_question(message, context: ContextTypes.DEFAULT_TYPE) -> None:
     records = context.user_data["records"]
-    idx, q = flow.current_step_and_question(records, context.user_data["step_idx"], allow_photo=False)
+    parts = context.user_data.get("parts")
+    idx, q = flow.current_step_and_question(records, context.user_data["step_idx"],
+                                           allow_photo=False, parts=parts)
     context.user_data["step_idx"] = idx
 
     if q is None:
@@ -150,8 +153,9 @@ async def send_next_question(message, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Intro da etapa (uma vez por etapa).
     shown = context.user_data["shown_intro"]
     if idx not in shown:
+        pos, total = flow.active_positions(idx, parts)
         await message.reply_text(
-            f"*{step.title}* — etapa {idx + 1} de {len(flow.STEPS)}\n\n{step.intro}",
+            f"*{step.title}* — etapa {pos} de {total}\n\n{step.intro}",
             parse_mode="Markdown",
         )
         shown.add(idx)

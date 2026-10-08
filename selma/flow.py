@@ -70,6 +70,17 @@ PHOTO_SLOTS: dict[str, list[tuple[str, str]]] = {
         ("oil_level_or_tap", "Nível de óleo ou posição do TAP"),
         ("dte", "DTE — detalhes de pendências encontradas"),
     ],
+    "coil_resistance_test": [
+        ("device_screen", "Tela do equipamento de medição"),
+        ("connection_setup", "Montagem das conexões"),
+    ],
+    "insulation_resistance_test": [
+        ("device_screen", "Tela do equipamento de medição"),
+    ],
+    "transformation_ratio_test": [
+        ("device_screen", "Tela do equipamento de medição"),
+        ("nameplate_diagram", "Diagrama de ligação da placa"),
+    ],
     "medium_voltage_protection": [
         ("disconnect_switch", "Chave seccionadora"),
         ("cb_front", "Disjuntor de média tensão (frente)"),
@@ -245,6 +256,50 @@ def s_transformer(vals: dict) -> list[Question]:
     if not dry:
         qs.append(C("has_visible_oil_leak", "Vazamento de óleo visível?", ["Sim", "Não"]))
     qs.append(C("is_grounded_carcass_x0", "Aterrado na carcaça e no X0?", ["Sim", "Não"]))
+    return qs
+
+
+def s_coil_resistance(vals: dict) -> list[Question]:
+    return [
+        T("equipment_model", "Modelo do equipamento utilizado no ensaio"),
+        T("hv_coil_h1_h2", "Resistência H1-H2 (em Ω)", section="1. Bobina de Alta Tensão:"),
+        T("hv_coil_h2_h3", "Resistência H2-H3 (em Ω)"),
+        T("hv_coil_h3_h1", "Resistência H3-H1 (em Ω)"),
+        T("lv_coil_x1_x0", "Resistência X1-X0 (em Ω)", section="2. Bobina de Baixa Tensão:"),
+        T("lv_coil_x2_x0", "Resistência X2-X0 (em Ω)"),
+        T("lv_coil_x3_x0", "Resistência X3-X0 (em Ω)"),
+    ]
+
+
+def s_insulation_resistance(vals: dict) -> list[Question]:
+    return [
+        T("equipment_model", "Modelo do equipamento utilizado no ensaio"),
+        T("primary_phase_r_to_ground", "Fase R x Terra (em MΩ)",
+          section="1. Primário (Alta Tensão):"),
+        T("primary_phase_s_to_ground", "Fase S x Terra (em MΩ)"),
+        T("primary_phase_t_to_ground", "Fase T x Terra (em MΩ)"),
+        T("secondary_phase_r_to_ground", "Fase R x Terra (em MΩ)",
+          section="2. Secundário (Baixa Tensão):"),
+        T("secondary_phase_s_to_ground", "Fase S x Terra (em MΩ)"),
+        T("secondary_phase_t_to_ground", "Fase T x Terra (em MΩ)"),
+    ]
+
+
+def s_transformation_ratio(vals: dict) -> list[Question]:
+    qs = [
+        T("secondary_voltage", "Tensão do secundário"),
+        T("tap_position", "Posição do TAP"),
+        T("connection_group", "Grupo de ligação (ex.: Dyn1)"),
+        T("equipment_model", "Modelo do equipamento utilizado no ensaio"),
+    ]
+    for n in (1, 2, 3):
+        qs += [
+            T(f"reading_{n}_h1_terminal", "Terminal H1", section=f"Leitura {n}:"),
+            T(f"reading_{n}_h2_terminal", "Terminal H2"),
+            T(f"reading_{n}_x1_terminal", "Terminal X1"),
+            T(f"reading_{n}_x2_terminal", "Terminal X2"),
+            T(f"reading_{n}_value_obtained", "Valor obtido"),
+        ]
     return qs
 
 
@@ -490,6 +545,18 @@ STEPS: list[Step] = [
          "Muito bem! Vamos agora para a inspeção do *Transformador*. ⚡",
          _with_photos("transformer_inspection", s_transformer),
          instance_field="transformer_number"),
+    Step("coil_resistance_test", "Teste de Resistência de Bobina",
+         "Agora o *Teste de Resistência de Bobina* do transformador. ⚡",
+         _with_photos("coil_resistance_test", s_coil_resistance),
+         instance_field="transformer_number"),
+    Step("insulation_resistance_test", "Teste de Resistência de Isolamento",
+         "Agora o *Teste de Resistência de Isolamento* do transformador. ⚡",
+         _with_photos("insulation_resistance_test", s_insulation_resistance),
+         instance_field="transformer_number"),
+    Step("transformation_ratio_test", "Teste de Relação de Transformação",
+         "Agora o *Teste de Relação de Transformação* do transformador. ⚡",
+         _with_photos("transformation_ratio_test", s_transformation_ratio),
+         instance_field="transformer_number"),
     Step("medium_voltage_protection", "Proteção em Média Tensão",
          "Agora vamos verificar a *Proteção em Média Tensão*. ⚡",
          _with_photos("medium_voltage_protection", s_medium_voltage)),
@@ -530,10 +597,21 @@ def derive_vals(records: list[dict]) -> dict:
     return vals
 
 
+# Respostas de uma etapa que outra etapa precisa enxergar (ex.: a potência do
+# transformador decide se a Média Tensão é exibida).
+SHARED_VARS = ("power_rating",)
+
+
+def shared_vals(all_records: list[dict]) -> dict:
+    """Valores de SHARED_VARS vindos de qualquer etapa (o último vence)."""
+    return {r["var"]: r["value"] for r in all_records if r["var"] in SHARED_VARS}
+
+
 def next_question(step: Step, records: list[dict],
-                  allow_photo: bool = True) -> Question | None:
-    """Próxima pergunta pendente. `allow_photo=False` (bots de texto) ignora as fotos."""
-    vals = derive_vals(records)
+                  allow_photo: bool = True, shared: dict | None = None) -> Question | None:
+    """Próxima pergunta pendente. `allow_photo=False` (bots de texto) ignora as fotos.
+    `shared`: respostas de outras etapas (ver `shared_vals`)."""
+    vals = {**(shared or {}), **derive_vals(records)}
     script = step.build_script(vals)
     answered = {r["qkey"] for r in records}
     for q in script:
@@ -544,17 +622,48 @@ def next_question(step: Step, records: list[dict],
     return None
 
 
+def step_active(step: Step, parts) -> bool:
+    """A etapa entra no fluxo? `parts` = partes escolhidas na OS (checklist_parts).
+    Vazio/None significa "todas", igual ao `universe` de db.apply_progress."""
+    return not parts or step.key in parts
+
+
+def active_positions(idx: int, parts) -> tuple[int, int]:
+    """(posição 1-based de `idx` entre as etapas ativas, total de etapas ativas)."""
+    active = [i for i, s in enumerate(STEPS) if step_active(s, parts)]
+    pos = sum(1 for i in active if i <= idx)
+    return max(pos, 1), max(len(active), 1)
+
+
+def realign_answers(answers: list[dict]) -> list[dict]:
+    """Recalcula `step_idx` de respostas salvas a partir de `step_key`.
+
+    Rascunhos antigos guardam a posição da etapa em STEPS; se o fluxo ganhar etapas
+    no meio, a posição muda mas a chave continua valendo.
+    """
+    pos = {s.key: i for i, s in enumerate(STEPS)}
+    for a in answers:
+        if a.get("step_key") in pos:
+            a["step_idx"] = pos[a["step_key"]]
+    return answers
+
+
 def current_step_and_question(records: list[dict], start_idx: int,
-                              allow_photo: bool = True) -> tuple[int, Question | None]:
+                              allow_photo: bool = True,
+                              parts=None) -> tuple[int, Question | None]:
     """Avança a partir de `start_idx` até a primeira etapa com pergunta pendente.
 
     Retorna (idx, pergunta). Se idx == len(STEPS), o fluxo terminou (pergunta None).
-    `records` deve conter a chave "step_idx" para filtrar por etapa.
+    `records` deve conter a chave "step_idx" para filtrar por etapa. Etapas fora de
+    `parts` (partes escolhidas na OS) são ignoradas.
     """
     idx = start_idx
     while idx < len(STEPS):
+        if not step_active(STEPS[idx], parts):
+            idx += 1
+            continue
         recs = [r for r in records if r["step_idx"] == idx]
-        q = next_question(STEPS[idx], recs, allow_photo)
+        q = next_question(STEPS[idx], recs, allow_photo, shared_vals(records))
         if q is None:
             idx += 1
             continue

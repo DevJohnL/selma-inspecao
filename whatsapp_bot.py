@@ -88,7 +88,9 @@ def _record_answer(sess: dict, value: str) -> None:
 
 
 def send_next_question(chat_id: str, sess: dict) -> None:
-    idx, q = flow.current_step_and_question(sess["records"], sess["step_idx"], allow_photo=False)
+    parts = sess.get("parts")
+    idx, q = flow.current_step_and_question(sess["records"], sess["step_idx"],
+                                            allow_photo=False, parts=parts)
     sess["step_idx"] = idx
 
     if q is None:
@@ -99,8 +101,8 @@ def send_next_question(chat_id: str, sess: dict) -> None:
 
     # Intro da etapa (uma vez por etapa).
     if idx not in sess["shown_intro"]:
-        send_text(chat_id,
-                  f"{step.title} — etapa {idx + 1} de {len(flow.STEPS)}\n\n{_plain(step.intro)}")
+        pos, total = flow.active_positions(idx, parts)
+        send_text(chat_id, f"{step.title} — etapa {pos} de {total}\n\n{_plain(step.intro)}")
         sess["shown_intro"].add(idx)
 
     if q.section:
@@ -209,6 +211,7 @@ def handle_pick_os(chat_id: str, sess: dict, text: str) -> None:
 
     sess["os_number"] = os_number
     sess["service_order_id"] = sid
+    sess["parts"] = db.get_checklist_parts(sid)
     sess["records"] = []
     sess["step_idx"] = 0
     sess["shown_intro"] = set()
