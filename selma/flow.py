@@ -2,9 +2,9 @@
 Typebot de `automacao/*.json`.
 
 Ordem dos bots:
-  entrada-alimentacao -> transformador -> protecao-media-tensao (só se a
-  potência do transformador for <= 300 kVA e reconhecível, essa etapa é
-  pulada) -> quadro-protecao-geral -> quadro-geral-baixa-tensao ->
+  entrada-alimentacao -> transformador -> protecao-media-tensao (começa
+  perguntando se a subestação tem Média Tensão; se "Não", a etapa termina ali e
+  conta como concluída) -> quadro-protecao-geral -> quadro-geral-baixa-tensao ->
   banco-capacitores -> condicoes-gerais -> servicos-executados ->
   observacoes-gerais
 
@@ -17,7 +17,6 @@ O motor (`next_question`) percorre o script e devolve a primeira pergunta cujo
 `qkey` próprio (var + "_desc") mas gravam na MESMA variável — como são inseridas
 depois da escolha, sobrescrevem o valor "OBS"/"Não" ao derivar os valores finais.
 """
-import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -163,30 +162,30 @@ def s_power_supply(vals: dict) -> list[Question]:
     return qs
 
 
-def parse_power_kva(raw) -> float | None:
-    """Extrai o primeiro valor numérico (kVA) de uma resposta de texto livre.
+# Respostas de dados da Média Tensão: rascunhos anteriores à pergunta
+# "_has_medium_voltage" que já têm alguma delas são tratados como "Sim".
+_MV_DATA_VARS = ("disconnect_switch_manufacturer", "disconnect_switch_rated_current",
+                 "has_arc_suppressors", "has_hh_fuses", "circuit_breaker_type")
 
-    Aceita vírgula ou ponto como separador decimal. Devolve None se não achar
-    nenhum número — usado para decidir, com segurança (fail-open), se a etapa
-    de Média Tensão deve ser exibida.
-    """
-    if raw is None:
-        return None
-    match = re.search(r"\d+(?:[.,]\d+)?", str(raw))
-    if not match:
-        return None
-    try:
-        return float(match.group(0).replace(",", "."))
-    except ValueError:
-        return None
+
+def has_medium_voltage(vals: dict) -> str | None:
+    """'Sim' / 'Não' / None (ainda não respondido)."""
+    ans = vals.get("_has_medium_voltage")
+    if ans is None and any(vals.get(v) not in (None, "") for v in _MV_DATA_VARS):
+        return "Sim"
+    return ans
 
 
 def s_medium_voltage(vals: dict) -> list[Question]:
-    power = parse_power_kva(vals.get("power_rating"))
-    if power is not None and power <= 300:
-        return []
+    has_mv = has_medium_voltage(vals)
+    if vals.get("_has_medium_voltage") is not None or has_mv is None:
+        qs = [C("_has_medium_voltage", "A subestação possui Média Tensão?", ["Sim", "Não"])]
+    else:
+        qs = []  # rascunho antigo: já respondeu os dados, não pergunta de novo
+    if has_mv != "Sim":
+        return qs  # sem resposta ainda, ou "Não": etapa encerra aqui
 
-    qs = [
+    qs += [
         T("disconnect_switch_manufacturer", "Fabricante", section="1. Chave Seccionadora:"),
         T("disconnect_switch_rated_current", "Corrente nominal"),
         C("has_arc_suppressors", "Possui supressor de arco elétrico?", ["Sim", "Não"]),
@@ -559,7 +558,8 @@ STEPS: list[Step] = [
          instance_field="transformer_number"),
     Step("medium_voltage_protection", "Proteção em Média Tensão",
          "Agora vamos verificar a *Proteção em Média Tensão*. ⚡",
-         _with_photos("medium_voltage_protection", s_medium_voltage)),
+         _with_photos("medium_voltage_protection", s_medium_voltage,
+                      lambda vals: has_medium_voltage(vals) == "Sim")),
     Step("general_protection_panel", "Quadro de Proteção Geral",
          "Chegamos no *Quadro de Proteção Geral*! ⚡ Atenção aos números.",
          _with_photos("general_protection_panel", s_general_protection),
@@ -597,9 +597,9 @@ def derive_vals(records: list[dict]) -> dict:
     return vals
 
 
-# Respostas de uma etapa que outra etapa precisa enxergar (ex.: a potência do
-# transformador decide se a Média Tensão é exibida).
-SHARED_VARS = ("power_rating",)
+# Respostas de uma etapa que outra etapa precisa enxergar (nenhuma no momento:
+# a Média Tensão passou a ter pergunta própria em vez de depender do kVA).
+SHARED_VARS: tuple[str, ...] = ()
 
 
 def shared_vals(all_records: list[dict]) -> dict:

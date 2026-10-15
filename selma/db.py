@@ -195,7 +195,7 @@ def _detect_filled_parts(service_order_id: int) -> list[str]:
 def apply_progress(service_order_id: int, completed_part: str | None = None,
                    recompute: bool = False, extra_completed: list[str] | None = None) -> dict:
     """`extra_completed`: partes resolvidas sem gravar dados (puladas por regra do
-    fluxo, ex.: Média Tensão com transformador <= 300 kVA) — contam como concluídas."""
+    fluxo, ex.: subestação sem Média Tensão) — contam como concluídas."""
     sb = client()
     try:
         so = (

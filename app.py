@@ -114,7 +114,7 @@ def step_skipped(step_idx: int) -> bool:
 
 
 def shared() -> dict:
-    """Respostas de outras etapas que influenciam o fluxo (ex.: kVA -> Média Tensão)."""
+    """Respostas de outras etapas que influenciam o fluxo (ver flow.SHARED_VARS)."""
     return flow.shared_vals(st.session_state.responses)
 
 
@@ -652,7 +652,7 @@ def _save_and_generate() -> None:
                                            instance=step.instance, mark_complete=True)
                 elif flow.next_question(step, recs, shared=shared()) is None:
                     # Nada a gravar e nada a perguntar: a regra do fluxo dispensou a
-                    # parte (Média Tensão <= 300 kVA, sem banco, sem serviço extra).
+                    # parte (sem Média Tensão, sem banco, sem serviço extra).
                     auto_done.append(step.key)
             db.apply_progress(sid, recompute=True, extra_completed=auto_done)
             if st.session_state.draft_token:
