@@ -203,12 +203,17 @@ def s_medium_voltage(vals: dict) -> list[Question]:
             T("circuit_breaker_rated_voltage_ur", "Tensão nominal (Ur)"),
             T("circuit_breaker_nbi_val", "Tensão nominal NBI (Ud ou Up)"),
         ]
+    qs.append(C("_has_relay", "Há relé de proteção?", ["Sim", "Não"],
+                section="3. Relé de Proteção:"))
+    if vals.get("_has_relay") == "Sim":
+        qs += [
+            T("relay_manufacturer", "Fabricante"),
+            T("relay_model", "Modelo"),
+            T("relay_serial_number", "Nº de Série"),
+            T("relay_rtc", "Relação dos TCs"),
+            T("relay_rtp", "RTP"),
+        ]
     qs += [
-        T("relay_manufacturer", "Fabricante", section="3. Relé de Proteção:"),
-        T("relay_model", "Modelo"),
-        T("relay_serial_number", "Nº de Série"),
-        T("relay_rtc", "Relação dos TCs"),
-        T("relay_rtp", "RTP"),
         T("ups_input_voltage", "Tensão de Entrada", section="Nobreak"),
         T("ups_output_voltage", "Tensão de Saída"),
         C("ups_status_normal", "Funcionamento está normal?", ["Sim", "Não"]),
@@ -273,14 +278,14 @@ def s_coil_resistance(vals: dict) -> list[Question]:
 def s_insulation_resistance(vals: dict) -> list[Question]:
     return [
         T("equipment_model", "Modelo do equipamento utilizado no ensaio"),
-        T("primary_phase_r_to_ground", "Fase R x Terra (em MΩ)",
+        T("primary_phase_r_to_ground", "Fase R x Massa (em Ω)",
           section="1. Primário (Alta Tensão):"),
-        T("primary_phase_s_to_ground", "Fase S x Terra (em MΩ)"),
-        T("primary_phase_t_to_ground", "Fase T x Terra (em MΩ)"),
-        T("secondary_phase_r_to_ground", "Fase R x Terra (em MΩ)",
+        T("primary_phase_s_to_ground", "Fase S x Massa (em Ω)"),
+        T("primary_phase_t_to_ground", "Fase T x Massa (em Ω)"),
+        T("secondary_phase_r_to_ground", "Fase R x Massa (em Ω)",
           section="2. Secundário (Baixa Tensão):"),
-        T("secondary_phase_s_to_ground", "Fase S x Terra (em MΩ)"),
-        T("secondary_phase_t_to_ground", "Fase T x Terra (em MΩ)"),
+        T("secondary_phase_s_to_ground", "Fase S x Massa (em Ω)"),
+        T("secondary_phase_t_to_ground", "Fase T x Massa (em Ω)"),
     ]
 
 
@@ -422,7 +427,6 @@ def s_capacitor_bank(vals: dict) -> list[Question]:
             T("model", "Modelo"),
             T("manufacturer", "Fabricante"),
             T("outputs_count", "Nº de Saídas"),
-            T("_tc_location", "Onde está instalado o TC?"),
             T("_cap_count", "Digite a quantidade de capacitores"),
         ]
         qs += _cap_chars(vals)
@@ -446,35 +450,36 @@ def s_capacitor_bank(vals: dict) -> list[Question]:
     return qs
 
 
+_GENERAL_CONDITIONS_STATUS = ["OK", "OBS", "N/C"]
+
+
+def _status(qs: list[Question], vals: dict, var: str, text: str,
+            section: str | None = None) -> None:
+    """Item padrão OK/OBS/N/C; em "OBS" pede a descrição da situação."""
+    qs.append(C(var, text, _GENERAL_CONDITIONS_STATUS, section=section))
+    if vals.get(var) == "OBS":
+        qs.append(DESC(var))
+
+
 def s_general_conditions(vals: dict) -> list[Question]:
-    qs = [C("walls_ceiling_floor_status",
-            "Paredes, Teto, Piso, Tapete ou estrado de borracha", ["OK", "OBS", "N/C"])]
-    if vals.get("walls_ceiling_floor_status") == "OBS":
-        qs.append(DESC("walls_ceiling_floor_status"))
-    qs.append(C("emergency_lighting_status", "Iluminação de emergência", ["OK", "OBS", "N/C"]))
-    if vals.get("emergency_lighting_status") == "OBS":
-        qs.append(DESC("emergency_lighting_status"))
+    qs: list[Question] = []
+    _status(qs, vals, "walls_ceiling_floor_status", "Paredes, Teto e Piso")
+    _status(qs, vals, "rubber_mat_status", "Estrado/Tapete de borracha")
+    _status(qs, vals, "emergency_lighting_status", "Iluminação de emergência")
     qs += [
         T("ambient_temperature", "Temperatura Ambiente"),
         T("relative_humidity", "Umidade relativa do ar"),
-        T("extinguisher_co2_status", "Extintor CO2", section="2. Segurança e Documentação:"),
-        T("extinguisher_last_recharge", "Data da última recarga"),
-        C("rubber_gloves_hv_status", "Luvas de Borracha (17,5 kV)", ["OK", "OBS"]),
     ]
-    if vals.get("rubber_gloves_hv_status") == "OBS":
-        qs.append(DESC("rubber_gloves_hv_status"))
-    qs.append(C("gloves_box_status", "Há caixa de abrigo para elas?", ["Sim", "Não"]))
-    qs.append(C("single_line_diagram_status", "Unifilar da SE e do QGBT", ["OK", "OBS", "N/C"]))
-    if vals.get("single_line_diagram_status") == "OBS":
-        qs.append(DESC("single_line_diagram_status"))
-    qs += [
-        C("warning_signs_status", "Placas de advertência em grades", ["Sim", "Não"]),
-        C("are_gates_doors_grounded", "Grades e portas aterradas?", ["Sim", "Não"]),
-        C("are_gates_doors_locked", "Grades e portas com trancas?", ["Sim", "Não"]),
-        C("gates_doors_condition", "Condições de grades e portas", ["OK", "OBS", "NC"]),
-    ]
-    if vals.get("gates_doors_condition") == "OBS":
-        qs.append(DESC("gates_doors_condition"))
+    _status(qs, vals, "extinguisher_co2_status", "Extintor CO2",
+            section="2. Segurança e Documentação:")
+    qs.append(T("extinguisher_last_recharge", "Data da última recarga"))
+    _status(qs, vals, "rubber_gloves_hv_status", "Luvas de Borracha (17,5 kV)")
+    _status(qs, vals, "gloves_box_status", "Caixa de abrigo para as luvas")
+    _status(qs, vals, "single_line_diagram_status", "Unifilar da SE e do QGBT")
+    _status(qs, vals, "warning_signs_status", "Placas de advertência em grades")
+    _status(qs, vals, "are_gates_doors_grounded", "Aterramento de grades e portas")
+    _status(qs, vals, "are_gates_doors_locked", "Trancas de grades e portas")
+    _status(qs, vals, "gates_doors_condition", "Condições de grades e portas")
     return qs
 
 
@@ -504,6 +509,12 @@ def s_general_observations(vals: dict) -> list[Question]:
 # Definição das etapas
 # --------------------------------------------------------------------------
 
+# Slots de foto que dependem de uma resposta da própria etapa.
+_PHOTO_SLOT_APPLICABLE: dict[tuple[str, str], Callable[[dict], bool]] = {
+    ("medium_voltage_protection", "relay"): lambda vals: vals.get("_has_relay") != "Não",
+}
+
+
 def _with_photos(part_key: str, builder: Callable[[dict], list[Question]],
                  applicable: Callable[[dict], bool] = lambda vals: True,
                  ) -> Callable[[dict], list[Question]]:
@@ -516,7 +527,8 @@ def _with_photos(part_key: str, builder: Callable[[dict], list[Question]],
         qs = builder(vals)
         if not qs or not applicable(vals):
             return qs
-        return qs + [PH(slot, label) for slot, label in PHOTO_SLOTS.get(part_key, [])]
+        return qs + [PH(slot, label) for slot, label in PHOTO_SLOTS.get(part_key, [])
+                     if _PHOTO_SLOT_APPLICABLE.get((part_key, slot), lambda v: True)(vals)]
     return wrapped
 
 
