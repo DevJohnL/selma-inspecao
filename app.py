@@ -10,7 +10,7 @@ import html
 import os
 
 import streamlit as st
-import streamlit.components.v1 as components
+import streamlit.components.v1 as components  # fallback p/ Streamlit < 1.66
 
 # Na nuvem do Streamlit os segredos ficam em st.secrets e não em os.environ.
 # Copiamos para o ambiente ANTES de importar `selma` (config lê via os.getenv).
@@ -205,8 +205,22 @@ def goto_step(step_idx: int) -> None:
         st.session_state.stage = "chat"
 
 
+def _goto_label(i: int) -> str:
+    return ("✅ " if not step_pending(i) else
+            "⏭ " if step_skipped(i) else "▫️ ") + flow.STEPS[i].title
+
+
 def _on_goto_select() -> None:
-    goto_step(int(st.session_state["goto_select"]))
+    # Dependendo da versão do Streamlit, o estado do selectbox traz o índice da
+    # etapa ou o texto exibido (format_func); aceitamos os dois.
+    raw = st.session_state.get(f"goto_select_{st.session_state.step_idx}")
+    try:
+        target = int(raw)
+    except (TypeError, ValueError):
+        target = next((i for i in range(len(flow.STEPS))
+                       if step_active(i) and _goto_label(i) == raw), None)
+    if target is not None and 0 <= target < len(flow.STEPS):
+        goto_step(target)
 
 
 def go_back() -> None:
@@ -276,7 +290,7 @@ def render_transcript() -> None:
         )
     st.markdown(f'<div class="wa-chat">{"".join(rows)}</div>', unsafe_allow_html=True)
     # Auto-scroll: rola o container do chat até a última mensagem.
-    components.html(
+    scroll_js = (
         f"""
         <script>
             const n = {len(st.session_state.transcript)};
@@ -290,9 +304,12 @@ def render_transcript() -> None:
             setTimeout(scroll, 60);
             setTimeout(scroll, 200);
         </script>
-        """,
-        height=0,
+        """
     )
+    if hasattr(st, "iframe"):  # components.v1.html foi descontinuado
+        st.iframe(scroll_js, height=1)
+    else:
+        components.html(scroll_js, height=0)
 
 
 def render_login() -> None:
@@ -465,12 +482,11 @@ def render_chat() -> None:
         st.warning(st.session_state.draft_error)
 
     # Navegação livre: ir para qualquer etapa, voltar uma pergunta ou pular a etapa.
-    st.session_state["goto_select"] = idx
     st.selectbox(
         "Ir para a etapa", options=active,
-        format_func=lambda i: ("✅ " if not step_pending(i) else
-                               "⏭ " if step_skipped(i) else "▫️ ") + flow.STEPS[i].title,
-        key="goto_select", on_change=_on_goto_select,
+        index=active.index(idx) if idx in active else 0,
+        format_func=_goto_label,
+        key=f"goto_select_{idx}", on_change=_on_goto_select,
     )
     nav_back, nav_skip = st.columns(2)
     if nav_back.button("⬅ Voltar uma pergunta", use_container_width=True,
@@ -691,6 +707,32 @@ REPORT_LABELS = [
 ]
 
 
+def build_answers_text() -> str:
+    """Todas as respostas da OS em texto simples (para baixar, mesmo sem relatório)."""
+    lines = [f"Respostas da OS {st.session_state.os_number}"]
+    tech = st.session_state.technical
+    if tech and tech.get("name"):
+        lines.append(f"Técnico: {tech['name']}")
+    for idx, step in enumerate(flow.STEPS):
+        if not step_active(idx):
+            continue
+        lines += ["", step.title, "-" * len(step.title)]
+        if step_skipped(idx):
+            lines.append("(etapa pulada)")
+            continue
+        recs = _display_records(idx)
+        if not recs:
+            lines.append("(sem respostas)")
+        for r in recs:
+            lines.append(f"{r['label']}: {r['value']}")
+    return "\n".join(lines) + "\n"
+
+
+# Texto exibido no lugar do QGBT quando a etapa foi pulada (o Quadro de Proteção
+# Geral pode servir de QGBT em alguns clientes).
+QGBT_SKIPPED_TEXT = "Não aplicável: atendido pelo Quadro de Proteção Geral."
+
+
 def render_report() -> None:
     rep = st.session_state.report or {}
     st.markdown('<div class="wa-header">📄 Relatório técnico da OS '
@@ -711,10 +753,20 @@ def render_report() -> None:
         st.success("Todos os dados foram registrados e o relatório foi gerado com sucesso! "
                    "Até o próximo serviço 🫡😉😎")
 
+    st.download_button(
+        "⬇ Baixar as respostas (.txt)", data=build_answers_text(),
+        file_name=f"respostas_OS_{st.session_state.os_number}.txt", mime="text/plain",
+    )
+
     if rep:
+        qgbt_idx = next(i for i, s in enumerate(flow.STEPS)
+                        if s.key == "low_voltage_main_panel")
         for col, label in REPORT_LABELS:
             st.subheader(label)
-            st.write(rep.get(col) or "_(sem conteúdo)_")
+            if col == "quadro_geral_baixa_tensao" and step_skipped(qgbt_idx):
+                st.write(QGBT_SKIPPED_TEXT)
+            else:
+                st.write(rep.get(col) or "_(sem conteúdo)_")
 
     if st.button("🏠 Nova OS"):
         try:

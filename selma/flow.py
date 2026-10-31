@@ -2,9 +2,9 @@
 Typebot de `automacao/*.json`.
 
 Ordem dos bots:
-  entrada-alimentacao -> transformador -> protecao-media-tensao (começa
-  perguntando se a subestação tem Média Tensão; se "Não", a etapa termina ali e
-  conta como concluída) -> quadro-protecao-geral -> quadro-geral-baixa-tensao ->
+  entrada-alimentacao -> protecao-media-tensao (começa perguntando se a
+  subestação tem Média Tensão; se "Não", a etapa termina ali e conta como
+  concluída) -> transformador -> quadro-protecao-geral -> quadro-geral-baixa-tensao ->
   banco-capacitores -> condicoes-gerais -> servicos-executados ->
   observacoes-gerais
 
@@ -164,6 +164,7 @@ def s_power_supply(vals: dict) -> list[Question]:
 
 # Respostas de dados da Média Tensão: rascunhos anteriores à pergunta
 # "_has_medium_voltage" que já têm alguma delas são tratados como "Sim".
+_UPS_DATA_VARS = ("ups_input_voltage", "ups_output_voltage", "ups_status_normal")
 _MV_DATA_VARS = ("disconnect_switch_manufacturer", "disconnect_switch_rated_current",
                  "has_arc_suppressors", "has_hh_fuses", "circuit_breaker_type")
 
@@ -174,6 +175,15 @@ def has_medium_voltage(vals: dict) -> str | None:
     if ans is None and any(vals.get(v) not in (None, "") for v in _MV_DATA_VARS):
         return "Sim"
     return ans
+
+
+def has_ups(vals: dict) -> bool:
+    """Há nobreak? Rascunhos anteriores à pergunta "_has_ups" que já têm dados do
+    nobreak contam como "Sim"."""
+    ans = vals.get("_has_ups")
+    if ans is None:
+        return any(vals.get(v) not in (None, "") for v in _UPS_DATA_VARS)
+    return ans == "Sim"
 
 
 def s_medium_voltage(vals: dict) -> list[Question]:
@@ -213,11 +223,14 @@ def s_medium_voltage(vals: dict) -> list[Question]:
             T("relay_rtc", "Relação dos TCs"),
             T("relay_rtp", "RTP"),
         ]
-    qs += [
-        T("ups_input_voltage", "Tensão de Entrada", section="Nobreak"),
-        T("ups_output_voltage", "Tensão de Saída"),
-        C("ups_status_normal", "Funcionamento está normal?", ["Sim", "Não"]),
-    ]
+    if vals.get("_has_ups") is not None or not has_ups(vals):
+        qs.append(C("_has_ups", "Há nobreak?", ["Sim", "Não"], section="Nobreak"))
+    if has_ups(vals):
+        qs += [
+            T("ups_input_voltage", "Tensão de Entrada"),
+            T("ups_output_voltage", "Tensão de Saída"),
+            C("ups_status_normal", "Funcionamento está normal?", ["Sim", "Não"]),
+        ]
     return qs
 
 
@@ -405,6 +418,18 @@ def build_capacitors_json(vals: dict) -> str:
     return json.dumps({"count": n, "capacitors": capacitors}, ensure_ascii=False)
 
 
+def _cap_bank_extras(vals: dict, with_protection: bool = True) -> list[Question]:
+    """Proteção geral, seção do alimentador e marcas de aquecimento do banco."""
+    qs: list[Question] = []
+    if with_protection:
+        qs += [
+            T("general_protection_s", "Proteção geral"),
+            T("feeder_section_r", "Seção alimentador"),
+        ]
+    qs.append(C("heating_marks_status", "Há marcas de aquecimento?", ["Sim", "Não"]))
+    return qs
+
+
 def s_capacitor_bank(vals: dict) -> list[Question]:
     qs = [T("_bank_count", "Informe a quantidade de Bancos de capacitores")]
     count = vals.get("_bank_count")
@@ -422,6 +447,7 @@ def s_capacitor_bank(vals: dict) -> list[Question]:
     if tipo == "Timer":
         qs.append(T("_cap_count", "Digite a quantidade de capacitores"))
         qs += _cap_chars(vals)
+        qs += _cap_bank_extras(vals)
     elif tipo == "Controlador":
         qs += [
             T("model", "Modelo"),
@@ -430,6 +456,7 @@ def s_capacitor_bank(vals: dict) -> list[Question]:
             T("_cap_count", "Digite a quantidade de capacitores"),
         ]
         qs += _cap_chars(vals)
+        qs += _cap_bank_extras(vals)
     elif tipo == "Fixo":
         qs += [
             T("model", "Qual a seção transversal do alimentador?"),
@@ -447,6 +474,8 @@ def s_capacitor_bank(vals: dict) -> list[Question]:
             ]
         qs.append(T("_cap_count", "Digite a quantidade de capacitores"))
         qs += _cap_chars(vals)
+        # Fixo já pergunta seção do alimentador e proteção acima.
+        qs += _cap_bank_extras(vals, with_protection=False)
     return qs
 
 
@@ -492,11 +521,18 @@ def s_additional_services(vals: dict) -> list[Question]:
     return qs
 
 
+def _dry_transformer(vals: dict) -> bool:
+    """Transformador a seco (resposta vinda da etapa Transformador via SHARED_VARS)."""
+    return vals.get("is_dry_transformer") == "Sim"
+
+
 def s_general_observations(vals: dict) -> list[Question]:
-    qs = [C("oil_collection_status", "A coleta de óleo foi realizada?",
-            ["Sim", "Não"], section="1. Coleta de Óleo:")]
-    if vals.get("oil_collection_status") == "Não":
-        qs.append(T("oil_volume", "Descreva o motivo"))
+    qs: list[Question] = []
+    if not _dry_transformer(vals):
+        qs.append(C("oil_collection_status", "A coleta de óleo foi realizada?",
+                    ["Sim", "Não"], section="1. Coleta de Óleo:"))
+        if vals.get("oil_collection_status") == "Não":
+            qs.append(T("oil_volume", "Descreva o motivo"))
     qs.append(T("general_notes", "Existe alguma observação geral sobre o serviço?",
                section="2. Observações e Pendências:"))
     qs.append(C("materials_needed_list", "Ficou alguma pendência de material?", ["Sim", "Não"]))
@@ -512,6 +548,8 @@ def s_general_observations(vals: dict) -> list[Question]:
 # Slots de foto que dependem de uma resposta da própria etapa.
 _PHOTO_SLOT_APPLICABLE: dict[tuple[str, str], Callable[[dict], bool]] = {
     ("medium_voltage_protection", "relay"): lambda vals: vals.get("_has_relay") != "Não",
+    ("medium_voltage_protection", "ups"): has_ups,
+    ("general_observations", "oil_collection"): lambda vals: not _dry_transformer(vals),
 }
 
 
@@ -552,6 +590,10 @@ STEPS: list[Step] = [
     Step("power_supply_input", "Entrada de Alimentação",
          "Vamos começar pela *Entrada de Alimentação*. ⚡",
          _with_photos("power_supply_input", s_power_supply)),
+    Step("medium_voltage_protection", "Proteção em Média Tensão",
+         "Agora vamos verificar a *Proteção em Média Tensão*. ⚡",
+         _with_photos("medium_voltage_protection", s_medium_voltage,
+                      lambda vals: has_medium_voltage(vals) == "Sim")),
     Step("transformer_inspection", "Transformador",
          "Muito bem! Vamos agora para a inspeção do *Transformador*. ⚡",
          _with_photos("transformer_inspection", s_transformer),
@@ -568,10 +610,6 @@ STEPS: list[Step] = [
          "Agora o *Teste de Relação de Transformação* do transformador. ⚡",
          _with_photos("transformation_ratio_test", s_transformation_ratio),
          instance_field="transformer_number"),
-    Step("medium_voltage_protection", "Proteção em Média Tensão",
-         "Agora vamos verificar a *Proteção em Média Tensão*. ⚡",
-         _with_photos("medium_voltage_protection", s_medium_voltage,
-                      lambda vals: has_medium_voltage(vals) == "Sim")),
     Step("general_protection_panel", "Quadro de Proteção Geral",
          "Chegamos no *Quadro de Proteção Geral*! ⚡ Atenção aos números.",
          _with_photos("general_protection_panel", s_general_protection),
@@ -609,9 +647,9 @@ def derive_vals(records: list[dict]) -> dict:
     return vals
 
 
-# Respostas de uma etapa que outra etapa precisa enxergar (nenhuma no momento:
-# a Média Tensão passou a ter pergunta própria em vez de depender do kVA).
-SHARED_VARS: tuple[str, ...] = ()
+# Respostas de uma etapa que outra etapa precisa enxergar: transformador a seco
+# esconde a coleta de óleo nas Observações Gerais.
+SHARED_VARS: tuple[str, ...] = ("is_dry_transformer",)
 
 
 def shared_vals(all_records: list[dict]) -> dict:
