@@ -47,16 +47,28 @@ def save_answers(token: str, answers: list[dict]) -> None:
 
 
 def find_open_draft(os_number: int, technical_id: int | None) -> dict | None:
-    """Rascunho mais recente da OS ainda não salvo (para retomar de onde parou)."""
+    """Rascunho da OS para retomar de onde parou.
+
+    Prefere o mais recente em aberto que tenha respostas; se não houver, o último já
+    salvo (OS reaberta depois de concluída volta com as respostas, para revisar/editar
+    em vez de recomeçar do zero); por último, um rascunho vazio em aberto."""
     q = (
         db.client().table("inspection_draft").select("*")
         .eq("os_number", os_number)
-        .in_("status", ["in_progress", "pending_review"])
+        .in_("status", ["in_progress", "pending_review", "saved"])
     )
     if technical_id is not None:
         q = q.eq("technical_id", technical_id)
-    rows = q.order("created_at", desc=True).limit(1).execute().data or []
-    return _realigned(rows[0]) if rows else None
+    rows = q.order("created_at", desc=True).execute().data or []
+
+    def pick(statuses: tuple[str, ...], with_answers: bool) -> dict | None:
+        return next((r for r in rows if r["status"] in statuses
+                     and bool(r.get("answers")) == with_answers), None)
+
+    chosen = (pick(("in_progress", "pending_review"), True)
+              or pick(("saved",), True)
+              or pick(("in_progress", "pending_review"), False))
+    return _realigned(chosen) if chosen else None
 
 
 def get_draft(token: str) -> dict | None:
